@@ -4,9 +4,96 @@
 import os
 import json
 import random
+import ssl
+import urllib3
 from datasets import load_dataset
 from tqdm import tqdm
 import argparse
+
+# Fix SSL certificate verification issues
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['HF_HUB_DISABLE_SSL_VERIFY'] = 'true'
+os.environ['DATASETS_DISABLE_SSL_VERIFY'] = 'true'
+
+# Disable SSL verification warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Create unverified SSL context
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# Additional SSL bypass for requests
+import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
+
+class SSLBypassAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs['ssl_context'] = ssl.create_default_context()
+        kwargs['ssl_context'].check_hostname = False
+        kwargs['ssl_context'].verify_mode = ssl.CERT_NONE
+        return super().init_poolmanager(*args, **kwargs)
+
+# Apply SSL bypass to requests session
+session = requests.Session()
+session.mount('https://', SSLBypassAdapter())
+
+def check_existing_dataset(output_path: str) -> bool:
+    """Check if dataset file already exists"""
+    return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+
+def process_local_llava_video(llava_video_path: str, output_path: str, num_samples: int) -> int:
+    """Process already downloaded llava-video dataset from local directory"""
+    print(f"Processing local llava-video from {llava_video_path}...")
+    
+    if not os.path.exists(llava_video_path):
+        print(f"Warning: llava-video path {llava_video_path} does not exist")
+        return 0
+    
+    # Look for subdirectories like 0_30_s_academic_v0_1
+    subdirs = [d for d in os.listdir(llava_video_path) 
+               if os.path.isdir(os.path.join(llava_video_path, d))]
+    
+    print(f"Found {len(subdirs)} subdirectories in llava-video")
+    
+    samples = []
+    sample_count = 0
+    
+    for subdir in subdirs:
+        subdir_path = os.path.join(llava_video_path, subdir)
+        
+        # Look for JSON or video files in subdirectory
+        for file in os.listdir(subdir_path):
+            if sample_count >= num_samples:
+                break
+                
+            file_path = os.path.join(subdir_path, file)
+            
+            # Create a sample in SmolVLM2 format
+            if file.endswith(('.mp4', '.avi', '.mov')):
+                sample = {
+                    "conversations": [
+                        {"role": "user", "content": "Describe this video."},
+                        {"role": "assistant", "content": f"This is a video from {subdir}."}
+                    ],
+                    "video": file_path,
+                    "id": f"llava_video_{sample_count}"
+                }
+                samples.append(sample)
+                sample_count += 1
+        
+        if sample_count >= num_samples:
+            break
+    
+    # Shuffle and save
+    random.shuffle(samples)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    with open(output_path, 'w') as f:
+        json.dump(samples, f, indent=2)
+    
+    print(f"Processed {len(samples)} samples from local llava-video to {output_path}")
+    return len(samples)
 
 def download_and_sample_dataset(
     dataset_name: str,
@@ -73,6 +160,9 @@ def main():
     parser = argparse.ArgumentParser(description="Download datasets for SmolVLM2 training")
     parser.add_argument("--output_dir", default="data/datasets", help="Output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--skip_existing", action="store_true", help="Skip datasets that already exist")
+    parser.add_argument("--llava_video_path", default="../../llava-video", help="Path to local llava-video dataset")
+    parser.add_argument("--skip_datasets", nargs="*", help="List of dataset names to skip")
     args = parser.parse_args()
     
     random.seed(args.seed)
@@ -169,15 +259,47 @@ def main():
     total_samples = 0
     successful_downloads = 0
     
+    # Initialize skip list
+    skip_datasets = args.skip_datasets or []
+    
     for config in datasets_config:
-        samples = download_and_sample_dataset(
-            dataset_name=config["name"],
-            dataset_config=config["config"], 
-            split=config["split"],
-            num_samples=config["samples"],
-            output_path=config["output"],
-            modality=config["modality"]
-        )
+        dataset_name = config["name"]
+        output_path = config["output"]
+        
+        # Check if we should skip this dataset
+        if any(skip_name in dataset_name for skip_name in skip_datasets):
+            print(f"Skipping {dataset_name} (requested to skip)")
+            continue
+            
+        # Check if dataset already exists
+        if args.skip_existing and check_existing_dataset(output_path):
+            print(f"Skipping {dataset_name} (already exists at {output_path})")
+            # Count existing samples
+            try:
+                with open(output_path, 'r') as f:
+                    existing_samples = len(json.load(f))
+                total_samples += existing_samples
+                successful_downloads += 1
+            except:
+                pass
+            continue
+        
+        # Special handling for llava-video dataset
+        if "LLaVA-Video" in dataset_name:
+            samples = process_local_llava_video(
+                llava_video_path=args.llava_video_path,
+                output_path=output_path,
+                num_samples=config["samples"]
+            )
+        else:
+            samples = download_and_sample_dataset(
+                dataset_name=config["name"],
+                dataset_config=config["config"], 
+                split=config["split"],
+                num_samples=config["samples"],
+                output_path=config["output"],
+                modality=config["modality"]
+            )
         
         if samples > 0:
             total_samples += samples
