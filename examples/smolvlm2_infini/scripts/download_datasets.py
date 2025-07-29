@@ -15,6 +15,8 @@ os.environ['CURL_CA_BUNDLE'] = ''
 os.environ['REQUESTS_CA_BUNDLE'] = ''
 os.environ['HF_HUB_DISABLE_SSL_VERIFY'] = 'true'
 os.environ['DATASETS_DISABLE_SSL_VERIFY'] = 'true'
+os.environ['HF_DATASETS_TRUST_REMOTE_CODE'] = 'true'
+os.environ['PYTHONHTTPSVERIFY'] = '0'
 
 # Disable SSL verification warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -37,6 +39,21 @@ class SSLBypassAdapter(HTTPAdapter):
 # Apply SSL bypass to requests session
 session = requests.Session()
 session.mount('https://', SSLBypassAdapter())
+
+# Monkey patch requests to use our session
+original_get = requests.get
+original_post = requests.post
+
+def patched_get(*args, **kwargs):
+    kwargs['verify'] = False
+    return original_get(*args, **kwargs)
+
+def patched_post(*args, **kwargs):
+    kwargs['verify'] = False
+    return original_post(*args, **kwargs)
+
+requests.get = patched_get
+requests.post = patched_post
 
 def check_existing_dataset(output_path: str) -> bool:
     """Check if dataset file already exists"""
@@ -171,16 +188,16 @@ def main():
     datasets_config = [
         # Image datasets
         {
-            "name": "lmms-lab/LLaVA-OneVision", 
+            "name": "liuhaotian/LLaVA-Instruct-150K", 
             "config": None,
             "split": "train",
-            "samples": 200000,
-            "output": f"{args.output_dir}/llava_onevision_200k.json",
+            "samples": 150000,
+            "output": f"{args.output_dir}/llava_instruct_150k.json",
             "modality": "image"
         },
         {
             "name": "Lin-Chen/ShareGPT4V",
-            "config": None, 
+            "config": "ShareGPT4V", 
             "split": "train",
             "samples": 150000,
             "output": f"{args.output_dir}/sharegpt4v_150k.json",
@@ -189,7 +206,7 @@ def main():
         {
             "name": "lmms-lab/ai2d",
             "config": None,
-            "split": "train", 
+            "split": "test", 
             "samples": 50000,
             "output": f"{args.output_dir}/ai2d_50k.json",
             "modality": "image"
@@ -197,17 +214,17 @@ def main():
         {
             "name": "lmms-lab/ChartQA",
             "config": None,
-            "split": "train",
+            "split": "test",
             "samples": 40000, 
             "output": f"{args.output_dir}/chartqa_40k.json",
             "modality": "image"
         },
         {
-            "name": "lmms-lab/DVQA",
+            "name": "HuggingFaceM4/VQAv2",
             "config": None,
             "split": "train",
             "samples": 40000,
-            "output": f"{args.output_dir}/dvqa_40k.json", 
+            "output": f"{args.output_dir}/vqav2_40k.json", 
             "modality": "image"
         },
         
@@ -221,20 +238,20 @@ def main():
             "modality": "video"
         },
         {
-            "name": "lmms-lab/VideoChat",  
+            "name": "microsoft/VideoInstruct-100K",  
             "config": None,
             "split": "train",
             "samples": 20000,
-            "output": f"{args.output_dir}/videochat_20k.json",
+            "output": f"{args.output_dir}/videoinstruct_20k.json",
             "modality": "video"
         },
         {
-            "name": "lmms-lab/Video-ChatGPT",
+            "name": "Open-Orca/OpenOrca",
             "config": None,
             "split": "train", 
             "samples": 10000,
-            "output": f"{args.output_dir}/video_chatgpt_10k.json",
-            "modality": "video"
+            "output": f"{args.output_dir}/openorca_10k.json",
+            "modality": "text"
         },
         
         # Text datasets
