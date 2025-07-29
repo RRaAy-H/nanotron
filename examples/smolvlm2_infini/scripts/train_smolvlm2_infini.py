@@ -14,6 +14,12 @@ from transformers import (
     get_scheduler
 )
 from transformers.trainer_utils import get_last_checkpoint
+from torch.utils.data import DataLoader, Dataset
+from torch.nn.utils import clip_grad_norm_
+from tqdm import tqdm
+import yaml
+import json
+from PIL import Image
 import logging
 
 # Add nanotron to path
@@ -54,6 +60,18 @@ class DataArguments:
     max_seq_length: int = field(
         default=2048,
         metadata={"help": "Maximum sequence length"}
+    )
+    image_dir: str = field(
+        default="./images",
+        metadata={"help": "Directory containing training images"}
+    )
+    train_data_path: str = field(
+        default="./train_data.json",
+        metadata={"help": "Path to training data JSON file"}
+    )
+    eval_data_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to evaluation data JSON file"}
     )
 
 def replace_attention_with_infini(model, segment_length=512):
@@ -102,6 +120,71 @@ def replace_attention_with_infini(model, segment_length=512):
             
     logger.info(f"Replaced attention layers with infini-attention (segment_length={segment_length})")
     return model
+
+class VisionLanguageDataset(Dataset):
+    """Dataset for vision-language training"""
+    
+    def __init__(self, data_path: str, image_dir: str, processor, max_length: int = 2048):
+        self.processor = processor
+        self.max_length = max_length
+        self.image_dir = image_dir
+        
+        with open(data_path, 'r') as f:
+            self.data = json.load(f)
+            
+        logger.info(f"Loaded {len(self.data)} samples from {data_path}")
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        
+        try:
+            # Load image
+            image_path = os.path.join(self.image_dir, item['image'])
+            image = Image.open(image_path).convert('RGB')
+            
+            # Get text
+            text = item['text']
+            
+            # Process inputs
+            inputs = self.processor(
+                images=image,
+                text=text,
+                return_tensors="pt",
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length"
+            )
+            
+            # Remove batch dimension
+            for key in inputs:
+                if inputs[key] is not None:
+                    inputs[key] = inputs[key].squeeze(0)
+            
+            return inputs
+            
+        except Exception as e:
+            logger.warning(f"Error loading sample {idx}: {e}")
+            # Return a dummy sample in case of error
+            dummy_image = Image.new('RGB', (224, 224), color='white')
+            dummy_text = "Error loading sample"
+            
+            inputs = self.processor(
+                images=dummy_image,
+                text=dummy_text,
+                return_tensors="pt",
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length"
+            )
+            
+            for key in inputs:
+                if inputs[key] is not None:
+                    inputs[key] = inputs[key].squeeze(0)
+                    
+            return inputs
 
 class SmolVLM2InfiniTrainer:
     """Custom trainer for SmolVLM2 with Infini-Attention"""
@@ -155,10 +238,162 @@ class SmolVLM2InfiniTrainer:
         # Move model to device
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
+        self.model.train()
         
-        # Training loop would go here
-        # This is a simplified version - in practice you'd implement full training logic
+        # Create data loader
+        train_dataloader = DataLoader(
+            self.train_dataset,
+            batch_size=self.args.per_device_train_batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True
+        )
+        
+        # Training state
+        global_step = 0
+        total_loss = 0.0
+        
+        # Calculate total steps
+        total_steps = len(train_dataloader) * self.args.num_train_epochs
+        
+        logger.info(f"Training for {self.args.num_train_epochs} epochs")
+        logger.info(f"Total training steps: {total_steps}")
+        
+        # Training loop
+        for epoch in range(int(self.args.num_train_epochs)):
+            logger.info(f"Starting epoch {epoch + 1}/{int(self.args.num_train_epochs)}")
+            
+            epoch_loss = 0.0
+            progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
+            
+            for step, batch in enumerate(progress_bar):
+                # Move batch to device
+                batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+                
+                # Forward pass
+                try:
+                    outputs = self.model(**batch)
+                    loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                except Exception as e:
+                    logger.warning(f"Error in forward pass: {e}")
+                    continue
+                
+                # Backward pass
+                loss.backward()
+                
+                # Gradient clipping
+                if self.args.max_grad_norm > 0:
+                    clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+                
+                # Optimizer step
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
+                
+                # Update metrics
+                global_step += 1
+                step_loss = loss.item()
+                total_loss += step_loss
+                epoch_loss += step_loss
+                
+                # Update progress bar
+                progress_bar.set_postfix({
+                    'loss': f'{step_loss:.4f}',
+                    'avg_loss': f'{total_loss / global_step:.4f}',
+                    'lr': f'{self.scheduler.get_last_lr()[0]:.2e}'
+                })
+                
+                # Save checkpoint
+                if self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
+                    checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-{global_step}")
+                    self.save_checkpoint(checkpoint_dir, global_step)
+                
+                # Evaluation
+                if (self.args.eval_steps > 0 and global_step % self.args.eval_steps == 0 and 
+                    self.eval_dataset is not None):
+                    eval_loss = self.evaluate()
+                    logger.info(f"Step {global_step}: eval_loss = {eval_loss:.4f}")
+                    self.model.train()  # Set back to training mode
+            
+            avg_epoch_loss = epoch_loss / len(train_dataloader)
+            logger.info(f"Epoch {epoch + 1} completed. Average loss: {avg_epoch_loss:.4f}")
+            
+            # Save at end of epoch
+            if self.args.save_strategy == "epoch":
+                checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-epoch-{epoch + 1}")
+                self.save_checkpoint(checkpoint_dir, global_step)
+        
         logger.info("Training completed!")
+        logger.info(f"Final average loss: {total_loss / global_step:.4f}")
+        
+        return {
+            'train_loss': total_loss / global_step,
+            'global_step': global_step
+        }
+    
+    def evaluate(self):
+        """Evaluate the model"""
+        if self.eval_dataset is None:
+            logger.warning("No evaluation dataset provided")
+            return 0.0
+            
+        logger.info("Starting evaluation...")
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.eval()
+        
+        eval_dataloader = DataLoader(
+            self.eval_dataset,
+            batch_size=self.args.per_device_eval_batch_size,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True
+        )
+        
+        total_eval_loss = 0.0
+        num_eval_steps = 0
+        
+        with torch.no_grad():
+            for batch in tqdm(eval_dataloader, desc="Evaluating"):
+                # Move batch to device
+                batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+                
+                try:
+                    outputs = self.model(**batch)
+                    loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                    total_eval_loss += loss.item()
+                    num_eval_steps += 1
+                except Exception as e:
+                    logger.warning(f"Error in evaluation step: {e}")
+                    continue
+        
+        avg_eval_loss = total_eval_loss / num_eval_steps if num_eval_steps > 0 else 0.0
+        logger.info(f"Evaluation completed. Average loss: {avg_eval_loss:.4f}")
+        
+        return avg_eval_loss
+    
+    def save_checkpoint(self, output_dir: str, global_step: int):
+        """Save training checkpoint"""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save model state
+        model_state = {
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'global_step': global_step,
+        }
+        
+        torch.save(model_state, os.path.join(output_dir, "training_state.pt"))
+        
+        # Save model separately
+        torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+        
+        # Save processor
+        if self.processor:
+            self.processor.save_pretrained(output_dir)
+        
+        logger.info(f"Checkpoint saved to {output_dir}")
         
     def save_model(self, output_dir=None):
         """Save the trained model"""
@@ -235,9 +470,40 @@ def main():
         model.gradient_checkpointing_enable()
     
     # Prepare datasets
-    # In practice, you would load and prepare your datasets here
-    train_dataset = []  # Placeholder
-    eval_dataset = None  # Placeholder
+    logger.info("Loading datasets...")
+    
+    try:
+        # Load training dataset
+        if os.path.exists(data_args.train_data_path):
+            train_dataset = VisionLanguageDataset(
+                data_path=data_args.train_data_path,
+                image_dir=data_args.image_dir,
+                processor=processor,
+                max_length=data_args.max_seq_length
+            )
+        else:
+            logger.warning(f"Training data not found at {data_args.train_data_path}")
+            # Create dummy dataset for testing
+            train_dataset = []
+        
+        # Load evaluation dataset
+        eval_dataset = None
+        if data_args.eval_data_path and os.path.exists(data_args.eval_data_path):
+            eval_dataset = VisionLanguageDataset(
+                data_path=data_args.eval_data_path,
+                image_dir=data_args.image_dir,
+                processor=processor,
+                max_length=data_args.max_seq_length
+            )
+            logger.info(f"Loaded evaluation dataset with {len(eval_dataset)} samples")
+        else:
+            logger.info("No evaluation dataset provided")
+            
+    except Exception as e:
+        logger.error(f"Error loading datasets: {e}")
+        logger.info("Creating empty datasets for testing")
+        train_dataset = []
+        eval_dataset = None
     
     # Create trainer
     trainer = SmolVLM2InfiniTrainer(
@@ -255,8 +521,14 @@ def main():
     
     # Evaluate
     if training_args.do_eval and eval_dataset is not None:
-        logger.info("Starting evaluation...")
-        # Evaluation logic would go here
+        eval_results = trainer.evaluate()
+        logger.info(f"Evaluation results: {eval_results}")
+        
+        # Save evaluation results
+        eval_output_path = os.path.join(training_args.output_dir, "eval_results.json")
+        with open(eval_output_path, 'w') as f:
+            json.dump({'eval_loss': eval_results}, f, indent=2)
+        logger.info(f"Evaluation results saved to {eval_output_path}")
 
 if __name__ == "__main__":
     main()
