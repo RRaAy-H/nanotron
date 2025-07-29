@@ -1,0 +1,122 @@
+# Image datasets (80% of total - 640K samples)
+- json_path: data/datasets/llava_onevision_200k.json
+  sampling_strategy: random:25%
+  name: llava-onevision-subset
+  path: llava-onevision
+  modality: image
+  source: llava-onevision
+  _comment: 'Core multimodal instruction following - 200K samples'
+
+- json_path: data/datasets/sharegpt4v_150k.json
+  sampling_strategy: random:18.75%
+  name: sharegpt4v-quality
+  path: sharegpt4v
+  modality: image  
+  source: sharegpt4v
+  _comment: 'High-quality image conversations - 150K samples'
+
+- json_path: data/datasets/ai2d_50k.json
+  sampling_strategy: random:6.25%
+  name: ai2d-diagrams
+  path: ai2d
+  modality: image
+  source: ai2d
+  _comment: 'Scientific diagram understanding - 50K samples'
+
+- json_path: data/datasets/chartqa_40k.json
+  sampling_strategy: random:5%
+  name: chartqa-reasoning
+  path: chartqa
+  modality: image
+  source: chartqa
+  _comment: 'Chart and graph analysis - 40K samples'
+
+- json_path: data/datasets/dvqa_40k.json
+  sampling_strategy: random:5%
+  name: dvqa-documents
+  path: dvqa
+  modality: image
+  source: dvqa
+  _comment: 'Document visual QA - 40K samples'
+
+- json_path: data/datasets/tallyqa_30k.json
+  sampling_strategy: random:3.75%
+  name: tallyqa-counting
+  path: tallyqa
+  modality: image
+  source: tallyqa
+  _comment: 'Counting tasks - 30K samples'
+
+- json_path: data/datasets/scienceqa_25k.json
+  sampling_strategy: random:3.125%
+  name: scienceqa-reasoning
+  path: scienceqa
+  modality: image
+  source: scienceqa
+  _comment: 'Scientific reasoning - 25K samples'
+
+- json_path: data/datasets/textvqa_25k.json
+  sampling_strategy: random:3.125%
+  name: textvqa-ocr
+  path: textvqa
+  modality: image
+  source: textvqa
+  _comment: 'OCR and text reading - 25K samples'
+
+- json_path: data/datasets/vizwiz_20k.json
+  sampling_strategy: random:2.5%
+  name: vizwiz-accessibility
+  path: vizwiz
+  modality: image
+  source: vizwiz
+  _comment: 'Real-world accessibility - 20K samples'
+
+- json_path: data/datasets/coco_captions_60k.json
+  sampling_strategy: random:7.5%
+  name: coco-captions-dense
+  path: coco-captions
+  modality: image
+  source: coco-captions
+  _comment: 'Dense captioning - 60K samples'
+
+# Video datasets (12.5% of total - 100K samples)
+- json_path: data/datasets/llava_video_70k.json
+  sampling_strategy: random:8.75%
+  name: llava-video-understanding
+  path: llava-video
+  modality: video
+  source: llava-video
+  _comment: 'Video understanding and reasoning - 70K samples'
+
+- json_path: data/datasets/videochat_20k.json
+  sampling_strategy: random:2.5%
+  name: videochat-conversations
+  path: videochat
+  modality: video
+  source: videochat
+  _comment: 'Video conversation tasks - 20K samples'
+
+- json_path: data/datasets/video_chatgpt_10k.json
+  sampling_strategy: random:1.25%
+  name: video-chatgpt-complex
+  path: video-chatgpt
+  modality: video
+  source: video-chatgpt
+  _comment: 'Complex video reasoning - 10K samples'
+
+# Text datasets (7.5% of total - 60K samples)  
+- json_path: data/datasets/alpaca_40k.json
+  sampling_strategy: random:5%
+  name: alpaca-instructions
+  path: alpaca
+  modality: text
+  source: alpaca
+  _comment: 'Pure text instruction following - 40K samples'
+
+- json_path: data/datasets/sharegpt_20k.json
+  sampling_strategy: random:2.5%
+  name: sharegpt-conversations
+  path: sharegpt
+  modality: text
+  source: sharegpt
+  _comment: 'Conversational AI training - 20K samples'
