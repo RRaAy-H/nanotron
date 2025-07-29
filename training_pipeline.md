@@ -270,11 +270,11 @@ For optimal training of a 256M parameter model, we use a carefully balanced data
 | Dataset | Type | Samples | Percentage | Description |
 |---------|------|---------|------------|-------------|
 | **Image Datasets** | | **640K** | **80%** | |
-| LLaVA-OneVision | Image | 200K | 25% | Core instruction following |
+| LLaVA-Instruct-150K | Image | 150K | 18.75% | Core instruction following |
 | ShareGPT4V | Image | 150K | 18.75% | High-quality conversations |
 | AI2D | Image | 50K | 6.25% | Diagram understanding |
 | ChartQA | Image | 40K | 5% | Chart and graph analysis |
-| DVQA | Image | 40K | 5% | Document VQA |
+| VQAv2 | Image | 40K | 5% | Visual question answering |
 | TallyQA | Image | 30K | 3.75% | Counting tasks |
 | ScienceQA | Image | 25K | 3.125% | Scientific reasoning |
 | TextVQA | Image | 25K | 3.125% | OCR and text reading |
@@ -282,8 +282,8 @@ For optimal training of a 256M parameter model, we use a carefully balanced data
 | COCO Captions | Image | 60K | 7.5% | Dense captioning |
 | **Video Datasets** | | **100K** | **12.5%** | |
 | LLaVA-Video | Video | 70K | 8.75% | Video understanding |
-| VideoChat | Video | 20K | 2.5% | Video conversations |
-| Video-ChatGPT | Video | 10K | 1.25% | Complex video reasoning |
+| VideoInstruct-100K | Video | 20K | 2.5% | Video instruction following |
+| OpenOrca | Text | 10K | 1.25% | Text instruction following |
 | **Text Datasets** | | **60K** | **7.5%** | |
 | Alpaca | Text | 40K | 5% | Instruction following |
 | ShareGPT | Text | 20K | 2.5% | Conversational AI |
@@ -296,13 +296,13 @@ Create `scripts/mixtures/smolvlm2_256m_mixture.yaml`:
 
 ```yaml
 # Image datasets (80% of total - 640K samples)
-- json_path: /path/to/llava_onevision_200k.json
-  sampling_strategy: random:25%
-  name: llava-onevision-subset
-  path: llava-onevision
+- json_path: /path/to/llava_instruct_150k.json
+  sampling_strategy: random:18.75%
+  name: llava-instruct-subset
+  path: llava-instruct
   modality: image
-  source: llava-onevision
-  _comment: 'Core multimodal instruction following - 200K samples'
+  source: llava-instruct
+  _comment: 'Core multimodal instruction following - 150K samples'
 
 - json_path: /path/to/sharegpt4v_150k.json
   sampling_strategy: random:18.75%
@@ -328,13 +328,13 @@ Create `scripts/mixtures/smolvlm2_256m_mixture.yaml`:
   source: chartqa
   _comment: 'Chart and graph analysis - 40K samples'
 
-- json_path: /path/to/dvqa_40k.json
+- json_path: /path/to/vqav2_40k.json
   sampling_strategy: random:5%
-  name: dvqa-documents
-  path: dvqa
+  name: vqav2-questions
+  path: vqav2
   modality: image
-  source: dvqa
-  _comment: 'Document visual QA - 40K samples'
+  source: vqav2
+  _comment: 'Visual question answering - 40K samples'
 
 # Video datasets (12.5% of total - 100K samples)
 - json_path: /path/to/llava_video_70k.json
@@ -345,21 +345,21 @@ Create `scripts/mixtures/smolvlm2_256m_mixture.yaml`:
   source: llava-video
   _comment: 'Video understanding and reasoning - 70K samples'
 
-- json_path: /path/to/videochat_20k.json
+- json_path: /path/to/videoinstruct_20k.json
   sampling_strategy: random:2.5%
-  name: videochat-conversations
-  path: videochat
+  name: videoinstruct-conversations
+  path: videoinstruct
   modality: video
-  source: videochat
-  _comment: 'Video conversation tasks - 20K samples'
+  source: videoinstruct
+  _comment: 'Video instruction following - 20K samples'
 
-- json_path: /path/to/video_chatgpt_10k.json
+- json_path: /path/to/openorca_10k.json
   sampling_strategy: random:1.25%
-  name: video-chatgpt-complex
-  path: video-chatgpt
-  modality: video
-  source: video-chatgpt
-  _comment: 'Complex video reasoning - 10K samples'
+  name: openorca-instructions
+  path: openorca
+  modality: text
+  source: openorca
+  _comment: 'Text instruction following - 10K samples'
 
 # Text datasets (7.5% of total - 60K samples)  
 - json_path: /path/to/alpaca_40k.json
@@ -467,16 +467,16 @@ def main():
     datasets_config = [
         # Image datasets
         {
-            "name": "lmms-lab/LLaVA-OneVision", 
+            "name": "liuhaotian/LLaVA-Instruct-150K", 
             "config": None,
             "split": "train",
-            "samples": 200000,
-            "output": f"{args.output_dir}/llava_onevision_200k.json",
+            "samples": 150000,
+            "output": f"{args.output_dir}/llava_instruct_150k.json",
             "modality": "image"
         },
         {
             "name": "Lin-Chen/ShareGPT4V",
-            "config": None, 
+            "config": "ShareGPT4V", 
             "split": "train",
             "samples": 150000,
             "output": f"{args.output_dir}/sharegpt4v_150k.json",
@@ -485,7 +485,7 @@ def main():
         {
             "name": "lmms-lab/ai2d",
             "config": None,
-            "split": "train", 
+            "split": "test", 
             "samples": 50000,
             "output": f"{args.output_dir}/ai2d_50k.json",
             "modality": "image"
@@ -493,17 +493,17 @@ def main():
         {
             "name": "lmms-lab/ChartQA",
             "config": None,
-            "split": "train",
+            "split": "test",
             "samples": 40000, 
             "output": f"{args.output_dir}/chartqa_40k.json",
             "modality": "image"
         },
         {
-            "name": "lmms-lab/DVQA",
+            "name": "HuggingFaceM4/VQAv2",
             "config": None,
             "split": "train",
             "samples": 40000,
-            "output": f"{args.output_dir}/dvqa_40k.json", 
+            "output": f"{args.output_dir}/vqav2_40k.json", 
             "modality": "image"
         },
         
@@ -517,20 +517,20 @@ def main():
             "modality": "video"
         },
         {
-            "name": "lmms-lab/VideoChat",  
+            "name": "microsoft/VideoInstruct-100K",  
             "config": None,
             "split": "train",
             "samples": 20000,
-            "output": f"{args.output_dir}/videochat_20k.json",
+            "output": f"{args.output_dir}/videoinstruct_20k.json",
             "modality": "video"
         },
         {
-            "name": "lmms-lab/Video-ChatGPT",
+            "name": "Open-Orca/OpenOrca",
             "config": None,
             "split": "train", 
             "samples": 10000,
-            "output": f"{args.output_dir}/video_chatgpt_10k.json",
-            "modality": "video"
+            "output": f"{args.output_dir}/openorca_10k.json",
+            "modality": "text"
         },
         
         # Text datasets

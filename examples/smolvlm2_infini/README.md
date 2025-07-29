@@ -117,8 +117,8 @@ The core model is implemented in:
 ## Dataset Composition
 
 Optimized 800K sample mixture:
-- **Image datasets (80%)**: LLaVA-OneVision, ShareGPT4V, AI2D, ChartQA, DVQA, etc.
-- **Video datasets (12.5%)**: LLaVA-Video, VideoChat, Video-ChatGPT
+- **Image datasets (80%)**: LLaVA-Instruct-150K, ShareGPT4V, AI2D, ChartQA, VQAv2, etc.
+- **Video datasets (12.5%)**: LLaVA-Video, VideoInstruct-100K, OpenOrca
 - **Text datasets (7.5%)**: Alpaca, ShareGPT for instruction following
 
 ## Performance

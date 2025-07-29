@@ -1,14 +1,38 @@
 #!/usr/bin/env python3
-"""Download and prepare datasets for SmolVLM2-256M training"""
+"""Download and prepare datasets for SmolVLM2-256M training
+
+This script supports two download methods:
+1. Git clone (default) - Bypasses SSL certificate issues by using git instead of HTTPS
+2. HuggingFace datasets library - Traditional method
+
+Usage with git clone (recommended):
+    python download_datasets.py --output_dir data/datasets
+
+Usage with HF token authentication:
+    export HF_TOKEN=your_token_here
+    python download_datasets.py --output_dir data/datasets
+
+Usage without git (fallback):
+    python download_datasets.py --output_dir data/datasets --no_git
+
+Prerequisites for git method:
+    - git installed
+    - git-lfs installed (run: git lfs install)
+"""
 
 import os
 import json
 import random
 import ssl
 import urllib3
-from datasets import load_dataset
+import subprocess
+import shutil
+import tempfile
+from pathlib import Path
+from datasets import load_dataset, Dataset
 from tqdm import tqdm
 import argparse
+import pandas as pd
 
 # Fix SSL certificate verification issues
 os.environ['CURL_CA_BUNDLE'] = ''
@@ -173,6 +197,183 @@ def download_and_sample_dataset(
         print(f"Error processing {dataset_name}: {e}")
         return 0
 
+def download_dataset_with_git(
+    dataset_name: str,
+    dataset_config: str,
+    split: str,
+    num_samples: int,
+    output_path: str,
+    modality: str = "image",
+    use_git: bool = True
+):
+    """Download dataset using git clone (bypasses SSL issues)"""
+    
+    if not use_git:
+        return download_and_sample_dataset(
+            dataset_name, dataset_config, split, num_samples, output_path, modality
+        )
+    
+    print(f"Downloading {dataset_name} with git clone ({num_samples:,} samples)...")
+    
+    # Create temporary directory for git clone
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            # Setup git LFS
+            subprocess.run(["git", "lfs", "install"], check=True, capture_output=True)
+            
+            # Prepare clone URL
+            repo_url = f"https://huggingface.co/datasets/{dataset_name}"
+            
+            # Add HF_TOKEN for authentication if available
+            hf_token = os.environ.get('HF_TOKEN')
+            if hf_token:
+                # Parse the dataset name for URL construction
+                if '/' in dataset_name:
+                    username, repo_name = dataset_name.split('/', 1)
+                    repo_url = f"https://{username}:{hf_token}@huggingface.co/datasets/{dataset_name}"
+            
+            repo_dir = os.path.join(temp_dir, dataset_name.replace('/', '_'))
+            
+            print(f"Cloning {repo_url} to {repo_dir}...")
+            
+            # Clone the repository
+            result = subprocess.run([
+                "git", "clone", repo_url, repo_dir
+            ], capture_output=True, text=True, timeout=300)
+            
+            if result.returncode != 0:
+                print(f"Git clone failed: {result.stderr}")
+                print("Falling back to datasets library...")
+                return download_and_sample_dataset(
+                    dataset_name, dataset_config, split, num_samples, output_path, modality
+                )
+            
+            # Pull LFS files
+            print("Pulling LFS files...")
+            lfs_result = subprocess.run([
+                "git", "lfs", "pull"
+            ], cwd=repo_dir, capture_output=True, text=True, timeout=600)
+            
+            if lfs_result.returncode != 0:
+                print(f"Warning: LFS pull failed: {lfs_result.stderr}")
+            
+            # Load dataset from local directory
+            print("Loading dataset from local repository...")
+            try:
+                # Try to load using datasets library from local path
+                if dataset_config:
+                    dataset = load_dataset(repo_dir, dataset_config, split=split, streaming=True)
+                else:
+                    dataset = load_dataset(repo_dir, split=split, streaming=True)
+                
+            except Exception as e:
+                print(f"Direct load failed: {e}")
+                # Try to find and load parquet files manually
+                dataset = load_dataset_from_parquet(repo_dir, split, dataset_config)
+                
+                if dataset is None:
+                    print("Falling back to datasets library...")
+                    return download_and_sample_dataset(
+                        dataset_name, dataset_config, split, num_samples, output_path, modality
+                    )
+            
+            # Sample and convert data
+            samples = []
+            count = 0
+            
+            for item in tqdm(dataset, desc=f"Processing {dataset_name}"):
+                if count >= num_samples:
+                    break
+                
+                # Convert to SmolVLM2 format
+                if modality == "image":
+                    sample = {
+                        "conversations": item.get("conversations", []),
+                        "image": item.get("image", ""),
+                        "id": item.get("id", f"{dataset_name}_{count}")
+                    }
+                elif modality == "video":
+                    sample = {
+                        "conversations": item.get("conversations", []),
+                        "video": item.get("video", ""),
+                        "id": item.get("id", f"{dataset_name}_{count}")
+                    }
+                else:  # text
+                    sample = {
+                        "conversations": item.get("conversations", []),
+                        "id": item.get("id", f"{dataset_name}_{count}")
+                    }
+                
+                samples.append(sample)
+                count += 1
+            
+            # Shuffle and save
+            random.shuffle(samples)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            with open(output_path, 'w') as f:
+                json.dump(samples, f, indent=2)
+            
+            print(f"Saved {len(samples):,} samples to {output_path}")
+            return len(samples)
+            
+        except subprocess.TimeoutExpired:
+            print("Git operation timed out. Falling back to datasets library...")
+            return download_and_sample_dataset(
+                dataset_name, dataset_config, split, num_samples, output_path, modality
+            )
+        except Exception as e:
+            print(f"Git download failed: {e}")
+            print("Falling back to datasets library...")
+            return download_and_sample_dataset(
+                dataset_name, dataset_config, split, num_samples, output_path, modality
+            )
+
+def load_dataset_from_parquet(repo_dir: str, split: str, config: str = None):
+    """Load dataset from parquet files in cloned repository"""
+    
+    try:
+        data_dir = Path(repo_dir) / "data"
+        
+        if not data_dir.exists():
+            print(f"No data directory found in {repo_dir}")
+            return None
+        
+        # Look for parquet files
+        parquet_files = []
+        
+        # Check for config-specific directory
+        if config:
+            config_dir = data_dir / config
+            if config_dir.exists():
+                data_dir = config_dir
+        
+        # Look for split-specific directory
+        split_dir = data_dir / split
+        if split_dir.exists():
+            parquet_files = list(split_dir.glob("*.parquet"))
+        else:
+            # Look for parquet files with split prefix
+            parquet_files = list(data_dir.glob(f"{split}*.parquet"))
+            if not parquet_files:
+                parquet_files = list(data_dir.glob("*.parquet"))
+        
+        if not parquet_files:
+            print(f"No parquet files found for split '{split}' in {data_dir}")
+            return None
+        
+        print(f"Found {len(parquet_files)} parquet files")
+        
+        # Load parquet files
+        data_files = [str(f) for f in parquet_files]
+        dataset = load_dataset("parquet", data_files=data_files, split="train", streaming=True)
+        
+        return dataset
+        
+    except Exception as e:
+        print(f"Error loading parquet files: {e}")
+        return None
+
 def main():
     parser = argparse.ArgumentParser(description="Download datasets for SmolVLM2 training")
     parser.add_argument("--output_dir", default="data/datasets", help="Output directory")
@@ -180,7 +381,43 @@ def main():
     parser.add_argument("--skip_existing", action="store_true", help="Skip datasets that already exist")
     parser.add_argument("--llava_video_path", default="../../llava-video", help="Path to local llava-video dataset")
     parser.add_argument("--skip_datasets", nargs="*", help="List of dataset names to skip")
+    parser.add_argument("--use_git", action="store_true", default=True, help="Use git clone for downloads (bypasses SSL issues)")
+    parser.add_argument("--no_git", action="store_true", help="Disable git clone, use datasets library")
     args = parser.parse_args()
+    
+    # Handle git usage flag
+    use_git = args.use_git and not args.no_git
+    
+    # Check git prerequisites if using git method
+    if use_git:
+        try:
+            # Check if git is available
+            subprocess.run(["git", "--version"], check=True, capture_output=True)
+            
+            # Check if git-lfs is available
+            result = subprocess.run(["git", "lfs", "version"], capture_output=True)
+            if result.returncode != 0:
+                print("⚠️  Git LFS not found. Installing...")
+                subprocess.run(["git", "lfs", "install"], check=True)
+                print("✅ Git LFS installed successfully")
+            
+            print("✅ Git and Git LFS are available")
+            
+            # Check for HF_TOKEN
+            if os.environ.get('HF_TOKEN'):
+                print("✅ HF_TOKEN found for authentication")
+            else:
+                print("ℹ️  No HF_TOKEN found. Public datasets will be downloaded without authentication.")
+                
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"⚠️  Git prerequisites not met: {e}")
+            print("Falling back to datasets library method...")
+            use_git = False
+    
+    if use_git:
+        print("🔄 Using git clone method to bypass SSL issues")
+    else:
+        print("🔄 Using HuggingFace datasets library method")
     
     random.seed(args.seed)
     
@@ -309,13 +546,14 @@ def main():
                 num_samples=config["samples"]
             )
         else:
-            samples = download_and_sample_dataset(
+            samples = download_dataset_with_git(
                 dataset_name=config["name"],
                 dataset_config=config["config"], 
                 split=config["split"],
                 num_samples=config["samples"],
                 output_path=config["output"],
-                modality=config["modality"]
+                modality=config["modality"],
+                use_git=use_git
             )
         
         if samples > 0:
