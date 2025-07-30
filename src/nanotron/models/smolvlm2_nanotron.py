@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, Tuple, Union, List
-from transformers import Idefics3Config
-from transformers.models.idefics3.modeling_idefics3 import Idefics3VisionModel, Idefics3Connector
+# Update imports to use available classes
+from transformers.models.idefics3.configuration_idefics3 import Idefics3Config, Idefics3VisionConfig
+from transformers.models.idefics3.modeling_idefics3 import Idefics3VisionTransformer, Idefics3PreTrainedModel
 
 from nanotron.models.base import NanotronModel
 from nanotron.parallel.context import ParallelContext
@@ -19,7 +20,7 @@ class SmolVLM2NanotronModel(NanotronModel):
         self.parallel_context = parallel_context
         
         # Use Idefics3VisionModel directly (contains SigLIP) - same as SmolVLM2
-        self.vision_model = Idefics3VisionModel(config.vision_config)
+        self.vision_model = Idefics3VisionTransformer(config.vision_config)
         
         # Tensor parallel connector for vision-language fusion
         self.connector = self._build_tensor_parallel_connector(config)
@@ -43,22 +44,22 @@ class SmolVLM2NanotronModel(NanotronModel):
         self.image_seq_len = config.perceiver_config.resampler_n_latents
     
     def _build_tensor_parallel_connector(self, config):
-        """Build tensor parallel version of Idefics3Connector"""
+        """Build tensor parallel version of connector for Idefics3"""
         class TensorParallelIdefics3Connector(nn.Module):
             def __init__(self, config, parallel_context):
                 super().__init__()
-                # Use the same architecture as Idefics3Connector but with tensor parallelism
+                # Use the perceiver directly from idefics3.modeling_idefics3
                 from transformers.models.idefics3.modeling_idefics3 import Idefics3Perceiver
                 self.perceiver = Idefics3Perceiver(config.perceiver_config)
                 
-                # Replace the final projection with tensor parallel version
+                # Replace the projection with tensor parallel version
                 self.modality_projection = TensorParallelRowLinear(
                     in_features=config.perceiver_config.resampler_head_dim,
                     out_features=config.text_config.hidden_size,
                     pg=parallel_context.tp_pg,
                     bias=False
                 )
-            
+        
             def forward(self, image_hidden_states, attention_mask=None):
                 image_hidden_states = self.perceiver(
                     context=image_hidden_states,
@@ -66,7 +67,7 @@ class SmolVLM2NanotronModel(NanotronModel):
                 )
                 image_hidden_states = self.modality_projection(image_hidden_states)
                 return image_hidden_states
-        
+    
         return TensorParallelIdefics3Connector(config, self.parallel_context)
     
     def inputs_merger(
@@ -259,3 +260,29 @@ class SmolVLM2NanotronModel(NanotronModel):
     def get_tied_parameters(self):
         """Return tied parameters for nanotron"""
         return []
+    
+    # Add this method to the SmolVLM2NanotronModel class
+    def init_model_randomly(self, config):
+        """Initialize the model weights randomly (required abstract method)"""
+        # Initialize vision model
+        if hasattr(self.vision_model, "init_weights"):
+            self.vision_model.init_weights()
+        
+        # Initialize text model
+        if hasattr(self.text_model, "init_model_randomly"):
+            self.text_model.init_model_randomly(config.text_config)
+        
+        # Initialize connector
+        if hasattr(self.connector, "apply"):
+            def _init_weights(module):
+                if isinstance(module, nn.Linear):
+                    torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                    if module.bias is not None:
+                        torch.nn.init.zeros_(module.bias)
+            self.connector.apply(_init_weights)
+        
+        # Initialize LM head
+        if hasattr(self.lm_head, "weight"):
+            torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.02)
+        
+        return self
