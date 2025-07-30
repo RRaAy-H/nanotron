@@ -429,19 +429,20 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
     
-    # Try to load original SmolVLM2 model
+    # Load model
     try:
-        from transformers import AutoModelForVision2Seq
-        model = AutoModelForVision2Seq.from_pretrained(
+        # First try loading with AutoModel instead of AutoModelForVision2Seq
+        from transformers import AutoModel
+        model = AutoModel.from_pretrained(
             model_args.model_name_or_path,
-            trust_remote_code=model_args.trust_remote_code,
+            trust_remote_code=True,
             torch_dtype=torch.bfloat16 if training_args.bf16 else torch.float32,
         )
         
         # Replace attention layers with infini-attention if requested
         if model_args.use_infini_attention:
             model = replace_attention_with_infini(model, model_args.segment_length)
-            
+    
     except Exception as e:
         logger.warning(f"Could not load SmolVLM2 model: {e}")
         logger.info("Creating new SmolVLM2NanotronModel instead")
@@ -462,7 +463,7 @@ def main():
             tensor_parallel_size=1
         )
         
-        # Create model
+        # Create the model with parallel context
         model = SmolVLM2NanotronModel(config, parallel_context)
     
     # Set trainable parameters
