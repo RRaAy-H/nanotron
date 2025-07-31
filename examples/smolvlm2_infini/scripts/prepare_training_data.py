@@ -262,56 +262,59 @@ class GPUAcceleratedDataLoader:
                 return self._load_parquet_cpu_optimized(parquet_files, num_samples)
         
         try:
-            # Set GPU device context safely
-            with cp.cuda.Device(gpu_id):
-                print(f"Using GPU {gpu_id} for parquet processing...")
-                
-                # Estimate total rows using GPU-accelerated metadata reading
-                total_rows = self._estimate_total_rows_gpu(parquet_files)
+            # Set GPU device and ensure proper context
+            import os
+            os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+            cp.cuda.Device(gpu_id).use()
             
-                if total_rows <= num_samples * 2:
-                    # Load all files with GPU
-                    df_list = []
-                    for pfile in parquet_files:
-                        try:
-                            gpu_df = cudf.read_parquet(pfile)
-                            df_list.append(gpu_df)
-                        except Exception as e:
-                            print(f"GPU loading failed for {pfile}: {e}, trying CPU fallback")
-                            cpu_df = pd.read_parquet(pfile)
-                            gpu_df = cudf.from_pandas(cpu_df)
-                            df_list.append(gpu_df)
+            print(f"Using GPU {gpu_id} for parquet processing...")
+            
+            # Estimate total rows using GPU-accelerated metadata reading
+            total_rows = self._estimate_total_rows_gpu(parquet_files)
+            
+            if total_rows <= num_samples * 2:
+                # Load all files with GPU
+                df_list = []
+                for pfile in parquet_files:
+                    try:
+                        gpu_df = cudf.read_parquet(pfile)
+                        df_list.append(gpu_df)
+                    except Exception as e:
+                        print(f"GPU loading failed for {pfile}: {e}, trying CPU fallback")
+                        cpu_df = pd.read_parquet(pfile)
+                        gpu_df = cudf.from_pandas(cpu_df)
+                        df_list.append(gpu_df)
+                
+                # Concatenate on GPU
+                if df_list:
+                    combined_df = cudf.concat(df_list, ignore_index=True)
                     
-                    # Concatenate on GPU
-                    if df_list:
-                        combined_df = cudf.concat(df_list, ignore_index=True)
-                        
-                        # GPU-accelerated sampling
-                        if len(combined_df) > num_samples:
-                            # Use GPU random sampling
-                            indices = cp.random.choice(len(combined_df), size=num_samples, replace=False)
-                            combined_df = combined_df.iloc[indices]
-                        
-                        # Convert back to pandas for JSON serialization
-                        pandas_df = combined_df.to_pandas()
-                        samples = self._df_to_samples_vectorized(pandas_df, parquet_files[0])
-                        
-                        # Clean up GPU memory
-                        del combined_df, df_list
-                        if hasattr(cp, 'get_default_memory_pool'):
-                            cp.get_default_memory_pool().free_all_blocks()
-                        
-                        # Release GPU back to pool
-                        with self.gpu_lock:
-                            self.gpu_manager.release_gpu(gpu_id)
-                        
-                        return samples
-                else:
-                    # Use chunked GPU processing for large datasets
-                    result = self._chunked_gpu_processing(parquet_files, num_samples, total_rows, gpu_id)
+                    # GPU-accelerated sampling
+                    if len(combined_df) > num_samples:
+                        # Use GPU random sampling
+                        indices = cp.random.choice(len(combined_df), size=num_samples, replace=False)
+                        combined_df = combined_df.iloc[indices]
+                    
+                    # Convert back to pandas for JSON serialization
+                    pandas_df = combined_df.to_pandas()
+                    samples = self._df_to_samples_vectorized(pandas_df, parquet_files[0])
+                    
+                    # Clean up GPU memory
+                    del combined_df, df_list
+                    if hasattr(cp, 'get_default_memory_pool'):
+                        cp.get_default_memory_pool().free_all_blocks()
+                    
+                    # Release GPU back to pool
                     with self.gpu_lock:
                         self.gpu_manager.release_gpu(gpu_id)
-                    return result
+                    
+                    return samples
+            else:
+                # Use chunked GPU processing for large datasets
+                result = self._chunked_gpu_processing(parquet_files, num_samples, total_rows, gpu_id)
+                with self.gpu_lock:
+                    self.gpu_manager.release_gpu(gpu_id)
+                return result
                 
         except Exception as e:
             print(f"GPU processing failed on GPU {gpu_id}: {e}, falling back to CPU")
@@ -616,17 +619,36 @@ class GPUAcceleratedDataLoader:
             batch_dict = batch.to_dict('records')
             
             for idx, sample in enumerate(batch_dict):
+                # Convert bytes to base64 strings for JSON serialization
+                for key, value in list(sample.items()):
+                    if isinstance(value, bytes):
+                        try:
+                            # Try to decode as UTF-8 first
+                            sample[key] = value.decode('utf-8')
+                        except UnicodeDecodeError:
+                            # If it's binary data (like images), convert to base64
+                            import base64
+                            sample[key] = base64.b64encode(value).decode('ascii')
+                            sample[f"{key}_encoding"] = "base64"
+                
                 # Fast conversation format check
                 if "conversations" not in sample:
                     if "question" in sample and "answer" in sample:
                         sample["conversations"] = [
-                            {"from": "human", "value": sample["question"]},
-                            {"from": "gpt", "value": sample["answer"]}
+                            {"from": "human", "value": str(sample["question"])},
+                            {"from": "gpt", "value": str(sample["answer"])}
                         ]
                 
                 # Fast ID generation
                 if "id" not in sample:
                     sample["id"] = f"{file_stem}_{i + idx}"
+                
+                # Ensure all values are JSON serializable
+                for key, value in sample.items():
+                    if isinstance(value, (np.integer, np.floating)):
+                        sample[key] = value.item()
+                    elif isinstance(value, np.ndarray):
+                        sample[key] = value.tolist()
                 
                 samples.append(sample)
         
@@ -729,6 +751,75 @@ class GPUAcceleratedDataLoader:
             video_files = find_videos_in_dir(search_dirs[0])
         
         return video_files
+
+    def load_json_data(self, json_path: str, num_samples: int) -> List[Dict[str, Any]]:
+        """Load data from a JSON file"""
+        print(f"Loading JSON file {json_path}...")
+        samples = []
+        
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            if isinstance(data, list):
+                samples = data[:num_samples]
+            elif isinstance(data, dict):
+                # If it's a dict, check for common keys that might contain the data
+                for key in ['data', 'samples', 'annotations', 'items']:
+                    if key in data and isinstance(data[key], list):
+                        samples = data[key][:num_samples]
+                        break
+                if not samples:
+                    samples = [data]
+            
+            print(f"Loaded {len(samples)} samples from JSON file")
+            
+        except Exception as e:
+            print(f"Error loading JSON {json_path}: {e}")
+        
+        return samples[:num_samples]
+
+    def load_zip_directory_data(self, zip_dir: str, num_samples: int) -> List[Dict[str, Any]]:
+        """Load data from directory containing only ZIP files (ignoring JSON files)"""
+        print(f"Loading ZIP directory {zip_dir}...")
+        samples = []
+        
+        if not os.path.exists(zip_dir):
+            print(f"Directory does not exist: {zip_dir}")
+            return []
+        
+        # Find all zip files in the directory
+        zip_files = []
+        for file in os.listdir(zip_dir):
+            if file.endswith('.zip'):
+                zip_files.append(os.path.join(zip_dir, file))
+        
+        if not zip_files:
+            print(f"No zip files found in {zip_dir}")
+            return []
+        
+        print(f"Found {len(zip_files)} zip files to process")
+        
+        # Process each zip file until we have enough samples
+        samples_per_file = max(1, num_samples // len(zip_files))
+        
+        for zip_file in sorted(zip_files):
+            if len(samples) >= num_samples:
+                break
+            
+            remaining_samples = num_samples - len(samples)
+            file_samples = self.load_zip_data(zip_file, min(samples_per_file * 2, remaining_samples))
+            samples.extend(file_samples)
+            
+            print(f"Loaded {len(file_samples)} samples from {os.path.basename(zip_file)}")
+        
+        # Shuffle and limit to requested number
+        if len(samples) > num_samples:
+            random.shuffle(samples)
+            samples = samples[:num_samples]
+        
+        print(f"Total samples loaded: {len(samples)}")
+        return samples
 
     def load_zip_data(self, zip_path: str, num_samples: int) -> List[Dict[str, Any]]:
         """Optimized ZIP loading with streaming"""
@@ -897,7 +988,7 @@ class GPUAcceleratedDataLoader:
             samples = []
             
             # Add format validation
-            supported_formats = ["parquet", "video", "zip", "tar.gz", "tar", "tar_directory"]
+            supported_formats = ["parquet", "video", "zip", "tar.gz", "tar", "tar_directory", "json", "zip_directory"]
             if config["format"] not in supported_formats:
                 print(f"Unsupported format '{config['format']}' for dataset {config['name']}")
                 return 0
@@ -914,12 +1005,16 @@ class GPUAcceleratedDataLoader:
                 samples = self.load_video_data(
                     config["path"], config["samples"], config["name"], video_filter
                 )
+            elif config["format"] == "json":
+                samples = self.load_json_data(config["path"], config["samples"])
             elif config["format"] == "zip":
                 samples = self.load_zip_data(config["path"], config["samples"])
             elif config["format"] in ["tar.gz", "tar"]:
                 samples = self.load_tar_data(config["path"], config["samples"])
             elif config["format"] == "tar_directory":
                 samples = self.load_tar_directory_data(config["path"], config["samples"])
+            elif config["format"] == "zip_directory":
+                samples = self.load_zip_directory_data(config["path"], config["samples"])
             
             if samples:
                 # Ensure output directory exists
@@ -1018,8 +1113,8 @@ def main():
             "samples": 104000,
             "output": f"{args.output_dir}/m4_instruct_data.json",
             "modality": "multi-image",
-            "path": f"{args.base_path}/M4-Instruct-Data/m4_instruct_annotations.json",
-            "format": "zip"
+            "path": f"{args.base_path}/M4-Instruct-Data",
+            "format": "zip_directory"
         },
         {
             "name": "mammoth_multi_image",
