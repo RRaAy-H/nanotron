@@ -20,6 +20,9 @@ cd examples/smolvlm2_infini
 # Prepare datasets from local storage (according to new multimodal distribution)
 python scripts/prepare_training_data.py --output_dir data/datasets --base_path /data1/yihao
 
+# Validate data pipeline (recommended before training)
+./scripts/validate_pipeline.sh
+
 # Convert to Nanotron format
 python scripts/convert_smolvlm2_data.py
 ```
@@ -61,6 +64,36 @@ python scripts/evaluate_smolvlm2.py \
     --test_long_context
 ```
 
+## Data Pipeline Validation
+
+Before training, validate your data pipeline to ensure everything is properly configured:
+
+### Quick Validation
+```bash
+# Run complete validation workflow
+./scripts/validate_pipeline.sh
+
+# Show dataset statistics  
+python scripts/debug_data_pipeline.py --data_dir data/datasets --stats
+
+# Validate mixture configuration
+python scripts/debug_data_pipeline.py --mixture data/smolvlm2_256m_mixture.yaml --validate_mixture
+```
+
+### Advanced Debugging
+```bash
+# Inspect specific dataset
+python scripts/debug_data_pipeline.py --dataset data/datasets/magpie_pro_l3_80b_mt.json --inspect
+
+# Debug specific sample
+python scripts/debug_data_pipeline.py --dataset data/datasets/llava_video_1_2m.json --sample_id 0
+
+# Comprehensive pipeline test
+python scripts/test_data_pipeline.py --data_dir data/datasets --mixture_path data/smolvlm2_256m_mixture.yaml
+```
+
+See [DATA_PIPELINE_TESTING.md](scripts/DATA_PIPELINE_TESTING.md) for detailed testing documentation.
+
 ## Features
 
 - **Infini-Attention Integration**: Process sequences up to 16K tokens with 512-token segments
@@ -89,10 +122,14 @@ Key components:
 │   ├── smolvlm2_config.py          # Model configuration
 │   └── smolvlm2_training.yaml      # Training hyperparameters
 ├── scripts/
-│   ├── download_datasets.py        # Dataset downloader
+│   ├── prepare_training_data.py    # Dataset preparation from local storage
 │   ├── convert_smolvlm2_data.py    # Format converter
 │   ├── train_smolvlm2_infini.py    # Training script
-│   └── evaluate_smolvlm2.py        # Evaluation tools
+│   ├── evaluate_smolvlm2.py        # Evaluation tools
+│   ├── test_data_pipeline.py       # Comprehensive pipeline tests
+│   ├── debug_data_pipeline.py      # Data debugging tools
+│   ├── validate_pipeline.sh        # Complete validation workflow
+│   └── DATA_PIPELINE_TESTING.md    # Testing documentation
 ├── data/
 │   └── smolvlm2_256m_mixture.yaml  # Dataset mixture
 ├── SMOLVLM2_USAGE_GUIDE.md         # Detailed guide
