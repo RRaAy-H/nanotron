@@ -147,15 +147,33 @@ class GPUAcceleratedDataLoader:
         self.max_workers = max_workers or min(mp.cpu_count(), 8)
         self.use_gpu = use_gpu and CUDF_AVAILABLE
         self.gpu_manager = GPUManager() if self.use_gpu else None
+        self.gpu_lock = threading.Lock()  # Add GPU synchronization lock
         
         if self.use_gpu and self.gpu_manager.available_gpus:
             self.gpu_available = True
             print(f"Multi-GPU acceleration enabled with {len(self.gpu_manager.available_gpus)} available GPUs")
+            # Initialize RMM once globally to avoid thread-unsafe reinitialization
+            self._initialize_rmm_globally()
         else:
             self.gpu_available = False
             self.use_gpu = False
             if use_gpu:
                 print("No available GPUs found, falling back to CPU processing")
+    
+    def _initialize_rmm_globally(self):
+        """Initialize RMM once globally for all GPUs to avoid thread-safety issues"""
+        try:
+            if rmm is not None and self.gpu_manager and self.gpu_manager.available_gpus:
+                # Initialize RMM for all available GPUs at once
+                rmm.reinitialize(
+                    devices=self.gpu_manager.available_gpus,
+                    managed_memory=True,
+                    pool_allocator=True,
+                    initial_pool_size=2**29  # 512MB per GPU to be conservative
+                )
+                print(f"Initialized RMM memory pools for GPUs: {self.gpu_manager.available_gpus}")
+        except Exception as e:
+            print(f"Warning: Failed to initialize RMM globally: {e}. GPU operations may be slower.")
     
     def _get_cache_key(self, path: str, num_samples: int) -> str:
         """Generate cache key with GPU-accelerated hashing if available"""
@@ -236,75 +254,70 @@ class GPUAcceleratedDataLoader:
     
     def _load_parquet_gpu(self, parquet_files: List[str], num_samples: int) -> List[Dict]:
         """Multi-GPU accelerated parquet loading with cuDF"""
-        gpu_id = self.gpu_manager.get_best_gpu() if self.gpu_manager else None
-        
-        if gpu_id is None:
-            print("No GPU available, falling back to CPU")
-            return self._load_parquet_cpu_optimized(parquet_files, num_samples)
+        with self.gpu_lock:  # Synchronize GPU access
+            gpu_id = self.gpu_manager.get_best_gpu() if self.gpu_manager else None
+            
+            if gpu_id is None:
+                print("No GPU available, falling back to CPU")
+                return self._load_parquet_cpu_optimized(parquet_files, num_samples)
         
         try:
-            # Set GPU device
-            cp.cuda.Device(gpu_id).use()
-            
-            # Initialize RMM for this GPU
-            rmm.reinitialize(
-                devices=[gpu_id],
-                managed_memory=True,
-                pool_allocator=True,
-                initial_pool_size=2**30  # 1GB initial pool
-            )
-            
-            print(f"Using GPU {gpu_id} for parquet processing...")
-            
-            # Estimate total rows using GPU-accelerated metadata reading
-            total_rows = self._estimate_total_rows_gpu(parquet_files)
-            
-            if total_rows <= num_samples * 2:
-                # Load all files with GPU
-                df_list = []
-                for pfile in parquet_files:
-                    try:
-                        gpu_df = cudf.read_parquet(pfile)
-                        df_list.append(gpu_df)
-                    except Exception as e:
-                        print(f"GPU loading failed for {pfile}: {e}, trying CPU fallback")
-                        cpu_df = pd.read_parquet(pfile)
-                        gpu_df = cudf.from_pandas(cpu_df)
-                        df_list.append(gpu_df)
+            # Set GPU device context safely
+            with cp.cuda.Device(gpu_id):
+                print(f"Using GPU {gpu_id} for parquet processing...")
                 
-                # Concatenate on GPU
-                if df_list:
-                    combined_df = cudf.concat(df_list, ignore_index=True)
+                # Estimate total rows using GPU-accelerated metadata reading
+                total_rows = self._estimate_total_rows_gpu(parquet_files)
+            
+                if total_rows <= num_samples * 2:
+                    # Load all files with GPU
+                    df_list = []
+                    for pfile in parquet_files:
+                        try:
+                            gpu_df = cudf.read_parquet(pfile)
+                            df_list.append(gpu_df)
+                        except Exception as e:
+                            print(f"GPU loading failed for {pfile}: {e}, trying CPU fallback")
+                            cpu_df = pd.read_parquet(pfile)
+                            gpu_df = cudf.from_pandas(cpu_df)
+                            df_list.append(gpu_df)
                     
-                    # GPU-accelerated sampling
-                    if len(combined_df) > num_samples:
-                        # Use GPU random sampling
-                        indices = cp.random.choice(len(combined_df), size=num_samples, replace=False)
-                        combined_df = combined_df.iloc[indices]
-                    
-                    # Convert back to pandas for JSON serialization
-                    pandas_df = combined_df.to_pandas()
-                    samples = self._df_to_samples_vectorized(pandas_df, parquet_files[0])
-                    
-                    # Clean up GPU memory
-                    del combined_df, df_list
-                    if hasattr(cp, 'get_default_memory_pool'):
-                        cp.get_default_memory_pool().free_all_blocks()
-                    
-                    # Release GPU back to pool
-                    self.gpu_manager.release_gpu(gpu_id)
-                    
-                    return samples
-            else:
-                # Use chunked GPU processing for large datasets
-                result = self._chunked_gpu_processing(parquet_files, num_samples, total_rows, gpu_id)
-                self.gpu_manager.release_gpu(gpu_id)
-                return result
+                    # Concatenate on GPU
+                    if df_list:
+                        combined_df = cudf.concat(df_list, ignore_index=True)
+                        
+                        # GPU-accelerated sampling
+                        if len(combined_df) > num_samples:
+                            # Use GPU random sampling
+                            indices = cp.random.choice(len(combined_df), size=num_samples, replace=False)
+                            combined_df = combined_df.iloc[indices]
+                        
+                        # Convert back to pandas for JSON serialization
+                        pandas_df = combined_df.to_pandas()
+                        samples = self._df_to_samples_vectorized(pandas_df, parquet_files[0])
+                        
+                        # Clean up GPU memory
+                        del combined_df, df_list
+                        if hasattr(cp, 'get_default_memory_pool'):
+                            cp.get_default_memory_pool().free_all_blocks()
+                        
+                        # Release GPU back to pool
+                        with self.gpu_lock:
+                            self.gpu_manager.release_gpu(gpu_id)
+                        
+                        return samples
+                else:
+                    # Use chunked GPU processing for large datasets
+                    result = self._chunked_gpu_processing(parquet_files, num_samples, total_rows, gpu_id)
+                    with self.gpu_lock:
+                        self.gpu_manager.release_gpu(gpu_id)
+                    return result
                 
         except Exception as e:
             print(f"GPU processing failed on GPU {gpu_id}: {e}, falling back to CPU")
             if self.gpu_manager and gpu_id is not None:
-                self.gpu_manager.release_gpu(gpu_id)
+                with self.gpu_lock:
+                    self.gpu_manager.release_gpu(gpu_id)
             return self._load_parquet_cpu_optimized(parquet_files, num_samples)
         
         return []
@@ -353,44 +366,46 @@ class GPUAcceleratedDataLoader:
         rows_seen = 0
         sampling_ratio = min(1.0, num_samples * 3 / total_rows)
         
-        for pfile in parquet_files:
-            try:
-                # Read file with cuDF on specific GPU
-                gpu_df = cudf.read_parquet(pfile)
-                
-                # GPU-accelerated sampling
-                if sampling_ratio < 1.0:
-                    n_sample = max(1, int(len(gpu_df) * sampling_ratio))
-                    indices = cp.random.choice(len(gpu_df), size=n_sample, replace=False)
-                    gpu_df = gpu_df.iloc[indices]
-                
-                # Convert to pandas for processing
-                pandas_df = gpu_df.to_pandas()
-                chunk_samples = self._df_to_samples_vectorized(pandas_df, pfile)
-                
-                # Reservoir sampling
-                for sample in chunk_samples:
-                    if len(samples) < num_samples:
-                        samples.append(sample)
-                    else:
-                        j = random.randint(0, rows_seen)
-                        if j < num_samples:
-                            samples[j] = sample
-                    rows_seen += 1
-                
-                # Clean up GPU memory
-                del gpu_df, pandas_df
-                
-                if len(samples) >= num_samples:
-                    break
+        # Ensure we're using the correct GPU context
+        with cp.cuda.Device(gpu_id):
+            for pfile in parquet_files:
+                try:
+                    # Read file with cuDF on specific GPU
+                    gpu_df = cudf.read_parquet(pfile)
                     
-            except Exception as e:
-                print(f"GPU chunk processing failed for {pfile}: {e}")
-                continue
-        
-        # Final GPU memory cleanup
-        if hasattr(cp, 'get_default_memory_pool'):
-            cp.get_default_memory_pool().free_all_blocks()
+                    # GPU-accelerated sampling
+                    if sampling_ratio < 1.0:
+                        n_sample = max(1, int(len(gpu_df) * sampling_ratio))
+                        indices = cp.random.choice(len(gpu_df), size=n_sample, replace=False)
+                        gpu_df = gpu_df.iloc[indices]
+                    
+                    # Convert to pandas for processing
+                    pandas_df = gpu_df.to_pandas()
+                    chunk_samples = self._df_to_samples_vectorized(pandas_df, pfile)
+                    
+                    # Reservoir sampling
+                    for sample in chunk_samples:
+                        if len(samples) < num_samples:
+                            samples.append(sample)
+                        else:
+                            j = random.randint(0, rows_seen)
+                            if j < num_samples:
+                                samples[j] = sample
+                        rows_seen += 1
+                    
+                    # Clean up GPU memory
+                    del gpu_df, pandas_df
+                    
+                    if len(samples) >= num_samples:
+                        break
+                        
+                except Exception as e:
+                    print(f"GPU chunk processing failed for {pfile}: {e}")
+                    continue
+            
+            # Final GPU memory cleanup
+            if hasattr(cp, 'get_default_memory_pool'):
+                cp.get_default_memory_pool().free_all_blocks()
         
         return samples[:num_samples]
     
@@ -640,18 +655,24 @@ class GPUAcceleratedDataLoader:
         # GPU-accelerated sampling if available
         if len(video_files) > num_samples:
             if self.use_gpu and cp is not None:
-                gpu_id = self.gpu_manager.get_best_gpu()
+                with self.gpu_lock:
+                    gpu_id = self.gpu_manager.get_best_gpu()
+                
                 if gpu_id is not None:
                     try:
-                        cp.cuda.Device(gpu_id).use()
-                        # GPU random sampling
-                        indices = cp.random.choice(len(video_files), size=num_samples, replace=False)
-                        video_files = [video_files[i] for i in cp.asnumpy(indices)]
-                        self.gpu_manager.release_gpu(gpu_id)
-                    except:
+                        with cp.cuda.Device(gpu_id):
+                            # GPU random sampling
+                            indices = cp.random.choice(len(video_files), size=num_samples, replace=False)
+                            video_files = [video_files[i] for i in cp.asnumpy(indices)]
+                        
+                        with self.gpu_lock:
+                            self.gpu_manager.release_gpu(gpu_id)
+                    except Exception as e:
+                        print(f"GPU sampling failed: {e}, using CPU fallback")
                         video_files = random.sample(video_files, num_samples)
                         if gpu_id is not None:
-                            self.gpu_manager.release_gpu(gpu_id)
+                            with self.gpu_lock:
+                                self.gpu_manager.release_gpu(gpu_id)
                 else:
                     video_files = random.sample(video_files, num_samples)
             else:
@@ -781,6 +802,48 @@ class GPUAcceleratedDataLoader:
         
         return samples[:num_samples]
 
+    def load_tar_directory_data(self, tar_dir: str, num_samples: int) -> List[Dict[str, Any]]:
+        """Load data from directory containing multiple tar.gz files"""
+        print(f"Loading TAR directory {tar_dir}...")
+        samples = []
+        
+        if not os.path.exists(tar_dir):
+            print(f"Directory does not exist: {tar_dir}")
+            return []
+        
+        # Find all tar.gz files in the directory
+        tar_files = []
+        for file in os.listdir(tar_dir):
+            if file.endswith(('.tar.gz', '.tgz', '.tar')):
+                tar_files.append(os.path.join(tar_dir, file))
+        
+        if not tar_files:
+            print(f"No tar files found in {tar_dir}")
+            return []
+        
+        print(f"Found {len(tar_files)} tar files to process")
+        
+        # Process each tar file until we have enough samples
+        samples_per_file = max(1, num_samples // len(tar_files))
+        
+        for tar_file in sorted(tar_files):
+            if len(samples) >= num_samples:
+                break
+            
+            remaining_samples = num_samples - len(samples)
+            file_samples = self.load_tar_data(tar_file, min(samples_per_file * 2, remaining_samples))
+            samples.extend(file_samples)
+            
+            print(f"Loaded {len(file_samples)} samples from {os.path.basename(tar_file)}")
+        
+        # Shuffle and limit to requested number
+        if len(samples) > num_samples:
+            random.shuffle(samples)
+            samples = samples[:num_samples]
+        
+        print(f"Total samples loaded: {len(samples)}")
+        return samples
+
     def process_datasets_parallel(self, datasets_config: List[Dict], output_dir: str) -> Dict[str, int]:
         """Process multiple datasets in parallel with multi-GPU acceleration"""
         print(f"Processing {len(datasets_config)} datasets with {self.max_workers} workers...")
@@ -833,6 +896,17 @@ class GPUAcceleratedDataLoader:
         try:
             samples = []
             
+            # Add format validation
+            supported_formats = ["parquet", "video", "zip", "tar.gz", "tar", "tar_directory"]
+            if config["format"] not in supported_formats:
+                print(f"Unsupported format '{config['format']}' for dataset {config['name']}")
+                return 0
+            
+            # Add path validation
+            if not os.path.exists(config["path"]):
+                print(f"Path does not exist for dataset {config['name']}: {config['path']}")
+                return 0
+            
             if config["format"] == "parquet":
                 samples = self.load_parquet_data(config["path"], config["samples"])
             elif config["format"] == "video":
@@ -844,19 +918,34 @@ class GPUAcceleratedDataLoader:
                 samples = self.load_zip_data(config["path"], config["samples"])
             elif config["format"] in ["tar.gz", "tar"]:
                 samples = self.load_tar_data(config["path"], config["samples"])
+            elif config["format"] == "tar_directory":
+                samples = self.load_tar_directory_data(config["path"], config["samples"])
             
             if samples:
+                # Ensure output directory exists
+                os.makedirs(os.path.dirname(config["output"]), exist_ok=True)
+                
                 # Atomic write to prevent corruption
                 temp_output = config["output"] + ".tmp"
-                with open(temp_output, 'w') as f:
-                    json.dump(samples, f, indent=2)
-                os.rename(temp_output, config["output"])
-                return len(samples)
-            
-            return 0
+                try:
+                    with open(temp_output, 'w', encoding='utf-8') as f:
+                        json.dump(samples, f, indent=2, ensure_ascii=False)
+                    os.rename(temp_output, config["output"])
+                    return len(samples)
+                except Exception as write_error:
+                    print(f"Failed to write output for {config['name']}: {write_error}")
+                    # Clean up temp file if it exists
+                    if os.path.exists(temp_output):
+                        os.remove(temp_output)
+                    return 0
+            else:
+                print(f"No samples loaded for dataset {config['name']}")
+                return 0
             
         except Exception as e:
             print(f"Error processing {config['name']}: {e}")
+            import traceback
+            traceback.print_exc()
             return 0
 
 
@@ -938,7 +1027,7 @@ def main():
             "output": f"{args.output_dir}/mammoth_multi_image.json",
             "modality": "multi-image",
             "path": f"{args.base_path}/MAmmoTH-VL-Instruct-12M/multi_image_data",
-            "format": "tar.gz"
+            "format": "tar_directory"  # Directory containing multiple tar.gz files
         },
         
         # Image datasets (34.4% total)
