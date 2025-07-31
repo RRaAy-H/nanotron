@@ -61,7 +61,7 @@ All image datasets are in parquet format and located at `/data1/yihao/LLaVA-OneV
 | video-star/starb | 2.2% | Video | **Alternative sampling** | Random sampling from llava-video datasets (avoid duplicates) |
 | vista-400k/combined | 2.2% | TAR | `/data1/yihao/VISTA-400K/two_needle_niah_qa` | Direct sampling |
 | vript/long | 1.0% | Video | **Alternative sampling** | Random sampling from vista-400k/combined (avoid duplicates) |
-| ShareGPT4Video/all | 0.8% | Video | `/data1/yihao/ShareGPTVideo/train_300k` | Direct sampling |
+| ShareGPT4Video/all | 0.8% | Video | **Alternative sampling** | Random sampling from vista-400k/combined (avoid duplicates) |
 
 ## Sampling Notes
 
@@ -90,7 +90,6 @@ All image datasets are in parquet format and located at `/data1/yihao/LLaVA-OneV
 **Verified Dataset Locations:**
 - ✅ LLaVA-OneVision-Data: `/data1/yihao/LLaVA-OneVision-Data`
 - ✅ M4-Instruct-Data: `/data1/yihao/M4-Instruct-Data`  
-- ✅ ShareGPTVideo: `/data1/yihao/ShareGPTVideo/train_300k`
 - ✅ VISTA-400K: `/data1/yihao/VISTA-400K/two_needle_niah_qa`
 - ✅ MAmmoTH-VL-Instruct-12M: `/data1/yihao/MAmmoTH-VL-Instruct-12M/multi_image_data`
 - ✅ llava-video: `/data1/yihao/llava-video/` (various time-based subdirs)

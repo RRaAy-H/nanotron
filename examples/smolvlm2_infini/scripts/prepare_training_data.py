@@ -673,6 +673,63 @@ class CPUOptimizedDataLoader:
         print(f"Total samples loaded: {len(samples)}")
         return samples
 
+    def load_composite_data(self, composite_sources: List[Dict], num_samples: int) -> List[Dict[str, Any]]:
+        """Load data using composite sampling strategy"""
+        print(f"Loading composite dataset with {len(composite_sources)} sources...")
+        all_samples = []
+        
+        for source in composite_sources:
+            if "sources" in source:  # Handle remaining_image_datasets
+                source_samples = []
+                samples_per_subsource = max(1, int(num_samples * source["weight"] / len(source["sources"])))
+                
+                for subsource in source["sources"]:
+                    if os.path.exists(subsource["path"]):
+                        subsource_samples = self.load_parquet_data(subsource["path"], samples_per_subsource)
+                        source_samples.extend(subsource_samples)
+                    else:
+                        print(f"Warning: Subsource path not found: {subsource['path']}")
+                
+                # Limit to the weighted portion
+                target_samples = int(num_samples * source["weight"])
+                if len(source_samples) > target_samples:
+                    source_samples = random.sample(source_samples, target_samples)
+                
+                all_samples.extend(source_samples)
+            else:  # Handle direct sources like figureqa and raven
+                if os.path.exists(source["path"]):
+                    target_samples = int(num_samples * source["weight"])
+                    source_samples = self.load_parquet_data(source["path"], target_samples)
+                    all_samples.extend(source_samples)
+                else:
+                    print(f"Warning: Source path not found: {source['path']}")
+        
+        # Shuffle and limit to requested number
+        if len(all_samples) > num_samples:
+            random.shuffle(all_samples)
+            all_samples = all_samples[:num_samples]
+        
+        print(f"Loaded {len(all_samples)} samples from composite sources")
+        return all_samples
+
+    def load_alternative_sampling_data(self, alternative_source: Dict, num_samples: int) -> List[Dict[str, Any]]:
+        """Load data using alternative sampling strategy"""
+        print(f"Loading alternative sampling data from {alternative_source['name']}...")
+        
+        # Use the alternative source instead of the original
+        if alternative_source["format"] == "tar":
+            samples = self.load_tar_data(alternative_source["path"], num_samples)
+        elif alternative_source["format"] == "parquet":
+            samples = self.load_parquet_data(alternative_source["path"], num_samples)
+        elif alternative_source["format"] == "video":
+            samples = self.load_video_data(alternative_source["path"], num_samples, alternative_source["name"])
+        else:
+            print(f"Unsupported alternative format: {alternative_source['format']}")
+            return []
+        
+        print(f"Loaded {len(samples)} samples using alternative sampling")
+        return samples
+
     def process_datasets_parallel(self, datasets_config: List[Dict], output_dir: str) -> Dict[str, int]:
         """Process multiple datasets in parallel with maximum CPU utilization"""
         print(f"Processing {len(datasets_config)} datasets with {self.max_workers} CPU workers...")
@@ -724,15 +781,16 @@ class CPUOptimizedDataLoader:
             samples = []
             
             # Add format validation
-            supported_formats = ["parquet", "video", "zip", "tar.gz", "tar", "tar_directory", "json", "zip_directory"]
+            supported_formats = ["parquet", "video", "zip", "tar.gz", "tar", "tar_directory", "json", "zip_directory", "composite", "alternative_sampling"]
             if config["format"] not in supported_formats:
                 print(f"Unsupported format '{config['format']}' for dataset {config['name']}")
                 return 0
             
-            # Add path validation
-            if not os.path.exists(config["path"]):
-                print(f"Path does not exist for dataset {config['name']}: {config['path']}")
-                return 0
+            # Add path validation (skip for composite and alternative_sampling formats)
+            if config["format"] not in ["composite", "alternative_sampling"]:
+                if "path" not in config or not os.path.exists(config["path"]):
+                    print(f"Path does not exist for dataset {config['name']}: {config.get('path', 'N/A')}")
+                    return 0
             
             if config["format"] == "parquet":
                 samples = self.load_parquet_data(config["path"], config["samples"])
@@ -751,6 +809,10 @@ class CPUOptimizedDataLoader:
                 samples = self.load_tar_directory_data(config["path"], config["samples"])
             elif config["format"] == "zip_directory":
                 samples = self.load_zip_directory_data(config["path"], config["samples"])
+            elif config["format"] == "composite":
+                samples = self.load_composite_data(config["composite_sources"], config["samples"])
+            elif config["format"] == "alternative_sampling":
+                samples = self.load_alternative_sampling_data(config["alternative_source"], config["samples"])
             
             if samples:
                 # Ensure output directory exists
@@ -919,6 +981,44 @@ def main():
             "path": f"{args.base_path}/LLaVA-OneVision-Data/textocr(gpt4v)",
             "format": "parquet"
         },
+        # llava-onevision/other - 17.4% with composite sampling
+        {
+            "name": "llava_onevision_other",
+            "samples": 174000,
+            "output": f"{args.output_dir}/llava_onevision_other.json",
+            "modality": "image",
+            "format": "composite",
+            "composite_sources": [
+                {
+                    "name": "figureqa_cauldron_llava",
+                    "path": f"{args.base_path}/LLaVA-OneVision-Data/figureqa(cauldron,llava_format)",
+                    "format": "parquet",
+                    "weight": 0.35  # 70% total split between figureqa and raven
+                },
+                {
+                    "name": "raven_cauldron",
+                    "path": f"{args.base_path}/LLaVA-OneVision-Data/raven(cauldron)",
+                    "format": "parquet",
+                    "weight": 0.35  # 70% total split between figureqa and raven
+                },
+                {
+                    "name": "remaining_image_datasets",
+                    "weight": 0.30,  # 30% from remaining image datasets
+                    "sources": [
+                        {"path": f"{args.base_path}/LLaVA-OneVision-Data/qa", "format": "parquet"},
+                        {"path": f"{args.base_path}/LLaVA-OneVision-Data/image_textualization", "format": "parquet"}
+                    ]
+                }
+            ]
+        },
+        {
+            "name": "image_textualization",
+            "samples": 13000,
+            "output": f"{args.output_dir}/image_textualization.json",
+            "modality": "image",
+            "path": f"{args.base_path}/LLaVA-OneVision-Data/image_textualization",
+            "format": "parquet"
+        },
         
         # Video datasets (33.0% total)
         {
@@ -961,8 +1061,58 @@ def main():
             "samples": 8000,
             "output": f"{args.output_dir}/sharegpt4video_all.json",
             "modality": "video",
-            "path": f"{args.base_path}/ShareGPTVideo/train_300k",
-            "format": "video"
+            "format": "alternative_sampling",
+            "alternative_source": {
+                "name": "vista_400k_combined",
+                "path": f"{args.base_path}/VISTA-400K/two_needle_niah_qa/two_needle_niah_qa_14.tar",
+                "format": "tar"
+            }
+        },
+        # Additional video datasets to reach 33.0% distribution
+        {
+            "name": "llava_video_hound",
+            "samples": 44000,
+            "output": f"{args.output_dir}/llava_video_hound.json",
+            "modality": "video",
+            "path": f"{args.base_path}/llava-video",
+            "format": "video",
+            "video_filter": "hound_*"
+        },
+        {
+            "name": "other_video_combined",
+            "samples": 57000,
+            "output": f"{args.output_dir}/other_video_combined.json",
+            "modality": "video",
+            "format": "alternative_sampling",
+            "alternative_source": {
+                "name": "llava_video_combined",
+                "path": f"{args.base_path}/llava-video",
+                "format": "video"
+            }
+        },
+        {
+            "name": "video_star_starb",
+            "samples": 22000,
+            "output": f"{args.output_dir}/video_star_starb.json",
+            "modality": "video",
+            "format": "alternative_sampling",
+            "alternative_source": {
+                "name": "llava_video_combined",
+                "path": f"{args.base_path}/llava-video",
+                "format": "video"
+            }
+        },
+        {
+            "name": "vript_long",
+            "samples": 10000,
+            "output": f"{args.output_dir}/vript_long.json",
+            "modality": "video",
+            "format": "alternative_sampling",
+            "alternative_source": {
+                "name": "vista_400k_combined",
+                "path": f"{args.base_path}/VISTA-400K/two_needle_niah_qa/two_needle_niah_qa_14.tar",
+                "format": "tar"
+            }
         },
     ]
     
