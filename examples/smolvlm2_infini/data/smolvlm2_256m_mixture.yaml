@@ -1,211 +1,215 @@
-# Image datasets (34.4% of total) - Located at /data1/yihao/LLaVA-OneVision-Data (parquet format)
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/other.parquet
-  sampling_strategy: composite:17.4%
-  name: llava-onevision-other
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'Composite sampling: 70% from figureqa(cauldron,llava_format) + raven(cauldron), 30% from remaining image datasets'
+# Image datasets (34.4% of total)
+image:
+  - json_path: data/datasets/llava_onevision_other.json
+    sampling_strategy: all
+    name: llava-onevision-other
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'Composite sampling: 70% from figureqa + raven, 30% from remaining - 17.4%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/vision_flan_filtered.parquet
-  sampling_strategy: direct:3.9%
-  name: vision-flan-filtered
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'Vision FLAN filtered dataset - 3.9%'
+  - json_path: data/datasets/vision_flan_filtered.json
+    sampling_strategy: all
+    name: vision-flan-filtered
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'Vision FLAN filtered dataset - 3.9%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/mavis_math_metagen.parquet
-  sampling_strategy: direct:2.6%
-  name: mavis-math-metagen
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'MAVIS math metagen dataset - 2.6%'
+  - json_path: data/datasets/mavis_math_metagen.json
+    sampling_strategy: all
+    name: mavis-math-metagen
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'MAVIS math metagen dataset - 2.6%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/mavis_math_rule_geo.parquet
-  sampling_strategy: direct:2.5%
-  name: mavis-math-rule-geo
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'MAVIS math rule geometry dataset - 2.5%'
+  - json_path: data/datasets/mavis_math_rule_geo.json
+    sampling_strategy: all
+    name: mavis-math-rule-geo
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'MAVIS math rule geometry dataset - 2.5%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/sharegpt4o.parquet
-  sampling_strategy: direct:1.7%
-  name: sharegpt4o
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'ShareGPT4o dataset - 1.7%'
+  - json_path: data/datasets/sharegpt4o.json
+    sampling_strategy: all
+    name: sharegpt4o
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'ShareGPT4o dataset - 1.7%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/sharegpt4v_coco.parquet
-  sampling_strategy: direct:1.5%
-  name: sharegpt4v-coco
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'ShareGPT4V COCO dataset - 1.5%'
+  - json_path: data/datasets/sharegpt4v_coco.json
+    sampling_strategy: all
+    name: sharegpt4v-coco
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'ShareGPT4V COCO dataset - 1.5%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/image_textualization.parquet
-  sampling_strategy: direct:1.3%
-  name: image-textualization
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'Image textualization dataset - 1.3%'
+  - json_path: data/datasets/image_textualization.json
+    sampling_strategy: all
+    name: image-textualization
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'Image textualization dataset - 1.3%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/sharegpt4v_llava.parquet
-  sampling_strategy: direct:0.9%
-  name: sharegpt4v-llava
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'ShareGPT4V LLaVA dataset - 0.9%'
+  - json_path: data/datasets/sharegpt4v_llava.json
+    sampling_strategy: all
+    name: sharegpt4v-llava
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'ShareGPT4V LLaVA dataset - 0.9%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/MAPQA_MathV360K.parquet
-  sampling_strategy: direct:0.9%
-  name: mapqa-mathv360k
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'MAPQA MathV360K dataset - 0.9%'
+  - json_path: data/datasets/mapqa_mathv360k.json
+    sampling_strategy: all
+    name: mapqa-mathv360k
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'MAPQA MathV360K dataset - 0.9%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/qa.parquet
-  sampling_strategy: alternative:0.8%
-  name: qa-alternative
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'QA dataset with alternative sampling (figureqa or MAPQA substitute) - 0.8%'
+  - json_path: data/datasets/qa.json
+    sampling_strategy: all
+    name: qa-alternative
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'QA dataset with alternative sampling - 0.8%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/textocr_gpt4v.parquet
-  sampling_strategy: direct:0.8%
-  name: textocr-gpt4v
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: image
-  source: llava-onevision
-  _comment: 'TextOCR GPT4V dataset - 0.8%'
+  - json_path: data/datasets/textocr_gpt4v.json
+    sampling_strategy: all
+    name: textocr-gpt4v
+    path: ""
+    modality: image
+    source: llava-onevision
+    _comment: 'TextOCR GPT4V dataset - 0.8%'
 
-# Video datasets (33.0% of total) - Multiple sources and formats
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-video-178k/1-2m.mp4
-  sampling_strategy: direct:7.3%
-  name: llava-video-1-2m
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-video-178k
-  modality: video
-  source: llava-video-178k
-  _comment: 'LLaVA Video 1-2 minute clips - 7.3%'
+# Video datasets (33.0% of total)
+video:
+  - json_path: data/datasets/llava_video_1_2m.json
+    sampling_strategy: all
+    name: llava-video-1-2m
+    path: ""
+    modality: video
+    source: llava-video-178k
+    _comment: 'LLaVA Video 1-2 minute clips - 7.3%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-video-178k/2-3m.mp4
-  sampling_strategy: direct:7.0%
-  name: llava-video-2-3m
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-video-178k
-  modality: video
-  source: llava-video-178k
-  _comment: 'LLaVA Video 2-3 minute clips - 7.0%'
+  - json_path: data/datasets/llava_video_2_3m.json
+    sampling_strategy: all
+    name: llava-video-2-3m
+    path: ""
+    modality: video
+    source: llava-video-178k
+    _comment: 'LLaVA Video 2-3 minute clips - 7.0%'
 
-- json_path: other-video/combined
-  sampling_strategy: alternative:5.7%
-  name: other-video-combined
-  path: other-video
-  modality: video
-  source: other-video
-  _comment: 'Alternative sampling from llava-video datasets (avoid duplicates) - 5.7%'
+  - json_path: data/datasets/other_video_combined.json
+    sampling_strategy: all
+    name: other-video-combined
+    path: ""
+    modality: video
+    source: other-video
+    _comment: 'Alternative sampling from llava-video datasets - 5.7%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-video-178k/hound.mp4
-  sampling_strategy: direct:4.4%
-  name: llava-video-hound
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-video-178k
-  modality: video
-  source: llava-video-178k
-  _comment: 'LLaVA Video hound dataset - 4.4%'
+  - json_path: data/datasets/llava_video_hound.json
+    sampling_strategy: all
+    name: llava-video-hound
+    path: ""
+    modality: video
+    source: llava-video-178k
+    _comment: 'LLaVA Video hound dataset - 4.4%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-video-178k/0-30s.mp4
-  sampling_strategy: direct:2.4%
-  name: llava-video-0-30s
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-video-178k
-  modality: video
-  source: llava-video-178k
-  _comment: 'LLaVA Video 0-30 second clips - 2.4%'
+  - json_path: data/datasets/llava_video_0_30s.json
+    sampling_strategy: all
+    name: llava-video-0-30s
+    path: ""
+    modality: video
+    source: llava-video-178k
+    _comment: 'LLaVA Video 0-30 second clips - 2.4%'
 
-- json_path: video-star/starb
-  sampling_strategy: alternative:2.2%
-  name: video-star-starb
-  path: video-star
-  modality: video
-  source: video-star
-  _comment: 'Alternative sampling from llava-video datasets (avoid duplicates) - 2.2%'
+  - json_path: data/datasets/video_star_starb.json
+    sampling_strategy: all
+    name: video-star-starb
+    path: ""
+    modality: video
+    source: video-star
+    _comment: 'Alternative sampling from llava-video datasets - 2.2%'
 
-- json_path: /data1/yihao/VISTA-400K/two_needle_niah_qa/vista_combined.tar
-  sampling_strategy: direct:2.2%
-  name: vista-400k-combined
-  path: /data1/yihao/VISTA-400K/two_needle_niah_qa
-  modality: video
-  source: vista-400k
-  _comment: 'VISTA-400K combined TAR dataset - 2.2%'
+  - json_path: data/datasets/vista_400k_combined.json
+    sampling_strategy: all
+    name: vista-400k-combined
+    path: ""
+    modality: video
+    source: vista-400k
+    _comment: 'VISTA-400K combined dataset - 2.2%'
 
-- json_path: vript/long
-  sampling_strategy: alternative:1.0%
-  name: vript-long
-  path: vript
-  modality: video
-  source: vript
-  _comment: 'Alternative sampling from vista-400k/combined (avoid duplicates) - 1.0%'
+  - json_path: data/datasets/vript_long.json
+    sampling_strategy: all
+    name: vript-long
+    path: ""
+    modality: video
+    source: vript
+    _comment: 'Alternative sampling from vista-400k - 1.0%'
 
-- json_path: /data1/yihao/ShareGPTVideo/train_300k/sharegpt4video_all.json
-  sampling_strategy: direct:0.8%
-  name: sharegpt4video-all
-  path: /data1/yihao/ShareGPTVideo/train_300k
-  modality: video
-  source: ShareGPT4Video
-  _comment: 'ShareGPT4Video all dataset - 0.8%'
+  - json_path: data/datasets/sharegpt4video_all.json
+    sampling_strategy: all
+    name: sharegpt4video-all
+    path: ""
+    modality: video
+    source: ShareGPT4Video
+    _comment: 'ShareGPT4Video all dataset - 0.8%'
 
-# Text datasets (20.2% of total) - All in parquet format at /data1/yihao/LLaVA-OneVision-Data
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/magpie_pro_l3_80b_mt.parquet
-  sampling_strategy: direct:6.8%
-  name: magpie-pro-l3-80b-mt
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: text
-  source: llava-onevision
-  _comment: 'Magpie Pro L3 80B MT dataset - 6.8%'
+# Text datasets (20.2% of total)
+text:
+  - json_path: data/datasets/magpie_pro_l3_80b_mt.json
+    sampling_strategy: all
+    name: magpie-pro-l3-80b-mt
+    path: ""
+    modality: text
+    source: llava-onevision
+    _comment: 'Magpie Pro L3 80B MT dataset - 6.8%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/magpie_pro_l3_80b_st.parquet
-  sampling_strategy: direct:6.8%
-  name: magpie-pro-l3-80b-st
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: text
-  source: llava-onevision
-  _comment: 'Magpie Pro L3 80B ST dataset - 6.8%'
+  - json_path: data/datasets/magpie_pro_l3_80b_st.json
+    sampling_strategy: all
+    name: magpie-pro-l3-80b-st
+    path: ""
+    modality: text
+    source: llava-onevision
+    _comment: 'Magpie Pro L3 80B ST dataset - 6.8%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/magpie_pro_qwen2_72b_st.parquet
-  sampling_strategy: direct:5.8%
-  name: magpie-pro-qwen2-72b-st
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: text
-  source: llava-onevision
-  _comment: 'Magpie Pro Qwen2 72B ST dataset - 5.8%'
+  - json_path: data/datasets/magpie_pro_qwen2_72b_st.json
+    sampling_strategy: all
+    name: magpie-pro-qwen2-72b-st
+    path: ""
+    modality: text
+    source: llava-onevision
+    _comment: 'Magpie Pro Qwen2 72B ST dataset - 5.8%'
 
-- json_path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision/mathqa.parquet
-  sampling_strategy: direct:0.9%
-  name: mathqa
-  path: /data1/yihao/LLaVA-OneVision-Data/llava-onevision
-  modality: text
-  source: llava-onevision
-  _comment: 'MathQA dataset - 0.9%'
+  - json_path: data/datasets/mathqa.json
+    sampling_strategy: all
+    name: mathqa
+    path: ""
+    modality: text
+    source: llava-onevision
+    _comment: 'MathQA dataset - 0.9%'
 
-# Multi-image datasets (12.3% of total) - ZIP and TAR.GZ formats
-- json_path: /data1/yihao/M4-Instruct-Data/m4_instruct_data.zip
-  sampling_strategy: direct:10.4%
-  name: m4-instruct-data
-  path: /data1/yihao/M4-Instruct-Data
-  modality: multi-image
-  source: m4-instruct-data
-  _comment: 'M4 Instruct Data ZIP format - 10.4%'
+# Multi-image datasets (12.3% of total)
+multiimage:
+  - json_path: data/datasets/m4_instruct_data.json
+    sampling_strategy: all
+    name: m4-instruct-data
+    path: ""
+    modality: multi-image
+    source: m4-instruct-data
+    _comment: 'M4 Instruct Data - 10.4%'
 
-- json_path: /data1/yihao/MammoTH-VL_Instruct-12M/multi_image_data/shard_1.tar.gz
-  sampling_strategy: direct:1.9%
-  name: mammoth-multi-image
-  path: /data1/yihao/MammoTH-VL_Instruct-12M/multi_image_data
-  modality: multi-image
-  source: mammoth
-  _comment: 'MammoTH multi-image data TAR.GZ format - 1.9%'
+  - json_path: data/datasets/mammoth_multi_image.json
+    sampling_strategy: all
+    name: mammoth-multi-image
+    path: ""
+    modality: multi-image
+    source: mammoth
+    _comment: 'MammoTH multi-image data - 1.9%'

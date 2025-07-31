@@ -17,8 +17,8 @@ pip install pillow>=10.0.0 opencv-python-headless>=4.8.0
 # Navigate to this directory
 cd examples/smolvlm2_infini
 
-# Download datasets (according to new multimodal distribution)
-python scripts/download_datasets.py --output_dir data/datasets
+# Prepare datasets from local storage (according to new multimodal distribution)
+python scripts/prepare_training_data.py --output_dir data/datasets --base_path /data1/yihao
 
 # Convert to Nanotron format
 python scripts/convert_smolvlm2_data.py

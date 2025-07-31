@@ -85,8 +85,8 @@ cd examples/smolvlm2_infini
 # Create data directory
 mkdir -p data/datasets
 
-# Download datasets using our script
-python scripts/download_datasets.py --output_dir data/datasets --seed 42
+# Prepare datasets from local storage
+python scripts/prepare_training_data.py --output_dir data/datasets --base_path /data1/yihao --seed 42
 ```
 
 This will download samples according to the new multimodal dataset distribution:

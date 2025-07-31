@@ -381,7 +381,7 @@ Create `scripts/mixtures/smolvlm2_256m_mixture.yaml`:
 
 ### Dataset Download and Preparation
 
-Create `scripts/download_datasets.py`:
+Create `scripts/prepare_training_data.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -586,8 +586,8 @@ if __name__ == "__main__":
 ### Usage Instructions
 
 ```bash
-# Download datasets
-python scripts/download_datasets.py --output_dir data/datasets --seed 42
+# Prepare datasets from local storage
+python scripts/prepare_training_data.py --output_dir data/datasets --base_path /data1/yihao --seed 42
 
 # Update mixture config with actual paths
 # Edit scripts/mixtures/smolvlm2_256m_mixture.yaml to use correct paths
