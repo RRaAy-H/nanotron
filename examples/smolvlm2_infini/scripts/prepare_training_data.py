@@ -829,6 +829,289 @@ class CPUOptimizedDataLoader:
         print(f"Total samples loaded: {len(samples)}")
         return samples
 
+    def load_mammoth_tar_data(self, tar_dir: str, num_samples: int) -> List[Dict[str, Any]]:
+        """Load MAmmoTH dataset with separate large JSON annotations and TAR image files using fastest approach"""
+        print(f"Processing MAmmoTH dataset with large JSON file from {tar_dir}...")
+        
+        # Look for the mammoth_ov_2M.json file
+        json_path = os.path.join(tar_dir, "mammoth_ov_2M.json")
+        if not os.path.exists(json_path):
+            print(f"MAmmoTH annotation file not found: {json_path}")
+            print(f"Expected: {json_path}")
+            return []
+        
+        print(f"Found MAmmoTH annotation file: {os.path.basename(json_path)}")
+        print(f"File size: {os.path.getsize(json_path) / (1024**3):.2f} GB")
+        
+        # Build image index from all TAR files (fast operation)
+        print("Building image index from TAR files...")
+        image_index = self._build_tar_image_index(tar_dir)
+        if not image_index:
+            print("No images found in TAR files")
+            return []
+        
+        print(f"Built image index with {len(image_index)} available images")
+        
+        # Stream parse the large JSON file with filtering (memory-efficient)
+        print(f"Stream parsing JSON file to extract {num_samples} samples...")
+        samples = self._stream_parse_mammoth_json(json_path, image_index, num_samples)
+        
+        print(f"Successfully loaded {len(samples)} MAmmoTH samples")
+        return samples
+    
+    def _build_tar_image_index(self, tar_dir: str) -> set:
+        """Build fast lookup index of available images from TAR files"""
+        image_index = set()
+        
+        # Find all TAR files
+        tar_files = []
+        for file in os.listdir(tar_dir):
+            if file.endswith(('.tar.gz', '.tgz', '.tar')):
+                tar_files.append(os.path.join(tar_dir, file))
+        
+        if not tar_files:
+            return image_index
+        
+        # Parallel processing of TAR files for speed
+        def extract_image_paths(tar_path):
+            local_paths = set()
+            try:
+                mode = 'r:gz' if tar_path.endswith(('.tar.gz', '.tgz')) else 'r'
+                with tarfile.open(tar_path, mode) as tf:
+                    for member in tf.getmembers():
+                        if member.isfile() and member.name.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff')):
+                            # Store both full path and just filename for flexible matching
+                            local_paths.add(member.name)
+                            local_paths.add(os.path.basename(member.name))
+            except Exception as e:
+                print(f"Error reading TAR file {tar_path}: {e}")
+            return local_paths
+        
+        # Use parallel processing for maximum speed
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(tar_files))) as executor:
+            futures = [executor.submit(extract_image_paths, tar_file) for tar_file in tar_files]
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    paths = future.result()
+                    image_index.update(paths)
+                except Exception as e:
+                    print(f"Error processing TAR file: {e}")
+        
+        return image_index
+    
+    def _stream_parse_mammoth_json(self, json_path: str, image_index: set, num_samples: int) -> List[Dict[str, Any]]:
+        """Stream parse large JSON file with filtering for memory efficiency"""
+        samples = []
+        
+        try:
+            # Try to use ijson for true streaming if available
+            try:
+                import ijson
+                use_streaming = True
+                print("Using ijson for memory-efficient streaming")
+            except ImportError:
+                use_streaming = False
+                print("ijson not available, using chunked reading fallback")
+            
+            if use_streaming:
+                # True streaming approach with ijson
+                with open(json_path, 'rb') as f:
+                    parser = ijson.parse(f)
+                    current_item = {}
+                    in_array = False
+                    items_processed = 0
+                    
+                    for prefix, event, value in parser:
+                        if len(samples) >= num_samples:
+                            break
+                        
+                        # Handle array of objects structure
+                        if prefix == '' and event == 'start_array':
+                            in_array = True
+                        elif in_array and event == 'start_map':
+                            current_item = {}
+                        elif in_array and event == 'map_key':
+                            current_key = value
+                        elif in_array and event in ['string', 'number', 'boolean']:
+                            current_item[current_key] = value
+                        elif in_array and event == 'end_map':
+                            # Process completed item
+                            if self._should_include_mammoth_item(current_item, image_index):
+                                sample = self._convert_mammoth_to_sample(current_item, items_processed)
+                                samples.append(sample)
+                            items_processed += 1
+                            
+                            # Progress reporting
+                            if items_processed % 10000 == 0:
+                                print(f"Processed {items_processed:,} items, found {len(samples)} matching samples")
+            else:
+                # Fallback: chunked reading approach
+                samples = self._chunked_parse_mammoth_json(json_path, image_index, num_samples)
+                
+        except Exception as e:
+            print(f"Error parsing JSON file: {e}")
+            # Last resort fallback
+            print("Attempting fallback parsing...")
+            samples = self._fallback_parse_mammoth_json(json_path, image_index, num_samples)
+        
+        return samples[:num_samples]
+    
+    def _chunked_parse_mammoth_json(self, json_path: str, image_index: set, num_samples: int) -> List[Dict[str, Any]]:
+        """Chunked reading fallback for when ijson is not available"""
+        samples = []
+        
+        # Read file in chunks to avoid loading all large
+        chunk_size = 64 * 1024 * 1024  # 64MB chunks
+        buffer = ""
+        items_processed = 0
+        
+        with open(json_path, 'r', encoding='utf-8') as f:
+            while len(samples) < num_samples:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                
+                buffer += chunk
+                
+                # Find complete JSON objects in buffer
+                while '{' in buffer and '}' in buffer:
+                    try:
+                        # Find a complete JSON object
+                        start = buffer.find('{')
+                        if start == -1:
+                            break
+                        
+                        brace_count = 0
+                        end = start
+                        for i in range(start, len(buffer)):
+                            if buffer[i] == '{':
+                                brace_count += 1
+                            elif buffer[i] == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end = i + 1
+                                    break
+                        
+                        if brace_count == 0:
+                            # Found complete object
+                            json_str = buffer[start:end]
+                            buffer = buffer[end:]
+                            
+                            try:
+                                item = json.loads(json_str)
+                                if self._should_include_mammoth_item(item, image_index):
+                                    sample = self._convert_mammoth_to_sample(item, items_processed)
+                                    samples.append(sample)
+                                items_processed += 1
+                                
+                                if items_processed % 10000 == 0:
+                                    print(f"Processed {items_processed:,} items, found {len(samples)} matching samples")
+                                    
+                                if len(samples) >= num_samples:
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                        else:
+                            break
+                    except Exception:
+                        # Skip this chunk and continue
+                        buffer = buffer[1:]
+        
+        return samples
+    
+    def _fallback_parse_mammoth_json(self, json_path: str, image_index: set, num_samples: int) -> List[Dict[str, Any]]:
+        """Last resort: load entire JSON (risky for large files)"""
+        print("WARNING: Loading entire JSON file into memory - this may cause memory issues with large files")
+        samples = []
+        
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict) and 'data' in data:
+                items = data['data']
+            else:
+                print("Unexpected JSON structure")
+                return []
+            
+            for idx, item in enumerate(items):
+                if len(samples) >= num_samples:
+                    break
+                    
+                if self._should_include_mammoth_item(item, image_index):
+                    sample = self._convert_mammoth_to_sample(item, idx)
+                    samples.append(sample)
+                
+                if idx % 10000 == 0:
+                    print(f"Processed {idx:,} items, found {len(samples)} matching samples")
+        
+        except Exception as e:
+            print(f"Fallback parsing failed: {e}")
+        
+        return samples
+    
+    def _should_include_mammoth_item(self, item: Dict, image_index: set) -> bool:
+        """Check if item should be included based on image availability"""
+        if not isinstance(item, dict):
+            return False
+        
+        # Look for image key in various possible formats
+        image_path = None
+        for key in ['image', 'image_path', 'filename', 'file_name']:
+            if key in item:
+                image_path = item[key]
+                break
+        
+        if not image_path:
+            return False
+        
+        # Check both full path and just filename
+        image_filename = os.path.basename(image_path)
+        return image_path in image_index or image_filename in image_index
+    
+    def _convert_mammoth_to_sample(self, item: Dict, idx: int) -> Dict[str, Any]:
+        """Convert MAmmoTH annotation to training sample format"""
+        sample = {
+            "id": item.get("id", f"mammoth_{idx}"),
+            "conversations": []
+        }
+        
+        # Handle different conversation formats
+        if "conversations" in item and isinstance(item["conversations"], list):
+            sample["conversations"] = item["conversations"]
+        elif "question" in item and "answer" in item:
+            sample["conversations"] = [
+                {"from": "human", "value": str(item["question"])},
+                {"from": "gpt", "value": str(item["answer"])}
+            ]
+        elif "instruction" in item and "response" in item:
+            sample["conversations"] = [
+                {"from": "human", "value": str(item["instruction"])},
+                {"from": "gpt", "value": str(item["response"])}
+            ]
+        else:
+            # Generic fallback
+            sample["conversations"] = [
+                {"from": "human", "value": "Describe this image."},
+                {"from": "gpt", "value": "This is an image from the MAmmoTH dataset."}
+            ]
+        
+        # Add image reference
+        for key in ['image', 'image_path', 'filename', 'file_name']:
+            if key in item:
+                sample["image"] = item[key]
+                break
+        
+        # Add any additional fields
+        for key, value in item.items():
+            if key not in ["question", "answer", "instruction", "response", "conversations", "image", "image_path", "filename", "file_name", "id"]:
+                sample[key] = self._make_json_serializable(value)
+        
+        return sample
+
     def load_composite_data(self, composite_sources: List[Dict], num_samples: int) -> List[Dict[str, Any]]:
         """Load data using composite sampling strategy"""
         all_samples = []
@@ -935,7 +1218,7 @@ class CPUOptimizedDataLoader:
             samples = []
             
             # Add format validation
-            supported_formats = ["parquet", "video", "zip", "tar.gz", "tar", "tar_directory", "json", "zip_directory", "composite", "alternative_sampling"]
+            supported_formats = ["parquet", "video", "zip", "tar.gz", "tar", "tar_directory", "json", "zip_directory", "composite", "alternative_sampling", "mammoth_tar"]
             if config["format"] not in supported_formats:
                 print(f"Unsupported format '{config['format']}' for dataset {config['name']}")
                 return 0
@@ -963,6 +1246,8 @@ class CPUOptimizedDataLoader:
                 samples = self.load_tar_directory_data(config["path"], config["samples"])
             elif config["format"] == "zip_directory":
                 samples = self.load_zip_directory_data(config["path"], config["samples"])
+            elif config["format"] == "mammoth_tar":
+                samples = self.load_mammoth_tar_data(config["path"], config["samples"])
             elif config["format"] == "composite":
                 samples = self.load_composite_data(config["composite_sources"], config["samples"])
             elif config["format"] == "alternative_sampling":
@@ -1067,7 +1352,7 @@ def main():
             "output": f"{args.output_dir}/mammoth_multi_image.json",
             "modality": "multi-image",
             "path": f"{args.base_path}/MAmmoTH-VL-Instruct-12M/multi_image_data",
-            "format": "tar_directory"  # Directory containing multiple tar.gz files
+            "format": "mammoth_tar"  # MAmmoTH-specific format with large JSON annotation file
         },
         
         # Image datasets (34.4% total)
