@@ -242,10 +242,15 @@ class CPUOptimizedDataLoader:
                 # Polars lazy evaluation for memory efficiency
                 lazy_df = pl.scan_parquet(pfile)
                 
-                # Apply sampling at scan level if needed
+                # Apply sampling at scan level if needed - collect first then sample
                 if sampling_ratio < 1.0:
-                    n_sample = max(1, int(lazy_df.select(pl.count()).collect().item() * sampling_ratio))
-                    lazy_df = lazy_df.sample(n=n_sample, seed=42)
+                    df_temp = lazy_df.collect()
+                    n_sample = max(1, int(len(df_temp) * sampling_ratio))
+                    df_temp = df_temp.sample(n=n_sample, seed=42)
+                    lazy_df = df_temp.lazy()
+                else:
+                    # If no sampling needed, keep as lazy
+                    pass
                 
                 # Collect in batches to manage memory
                 batch_size = 10000
@@ -460,6 +465,12 @@ class CPUOptimizedDataLoader:
         # Determine search directories
         if video_filter:
             search_dirs = [d for d in path.glob(video_filter) if d.is_dir()]
+            print(f"Video filter '{video_filter}' found {len(search_dirs)} directories")
+            if len(search_dirs) == 0:
+                print(f"Available directories in {video_path}:")
+                for d in path.iterdir():
+                    if d.is_dir():
+                        print(f"  - {d.name}")
         else:
             search_dirs = [path]
         
@@ -984,7 +995,7 @@ def main():
         # llava-onevision/other - 17.4% with composite sampling
         {
             "name": "llava_onevision_other",
-            "samples": 174000,
+            "samples": 166000,
             "output": f"{args.output_dir}/llava_onevision_other.json",
             "modality": "image",
             "format": "composite",
@@ -1005,8 +1016,7 @@ def main():
                     "name": "remaining_image_datasets",
                     "weight": 0.30,  # 30% from remaining image datasets
                     "sources": [
-                        {"path": f"{args.base_path}/LLaVA-OneVision-Data/qa", "format": "parquet"},
-                        {"path": f"{args.base_path}/LLaVA-OneVision-Data/image_textualization", "format": "parquet"}
+                        {"path": f"{args.base_path}/LLaVA-OneVision-Data/image_textualization(filtered)", "format": "parquet"}
                     ]
                 }
             ]
@@ -1016,8 +1026,21 @@ def main():
             "samples": 13000,
             "output": f"{args.output_dir}/image_textualization.json",
             "modality": "image",
-            "path": f"{args.base_path}/LLaVA-OneVision-Data/image_textualization",
+            "path": f"{args.base_path}/LLaVA-OneVision-Data/image_textualization(filtered)",
             "format": "parquet"
+        },
+        # qa dataset using alternative sampling (0.8% = 8000 samples)
+        {
+            "name": "qa",
+            "samples": 8000,
+            "output": f"{args.output_dir}/qa.json",
+            "modality": "image",
+            "format": "alternative_sampling",
+            "alternative_source": {
+                "name": "figureqa_substitute",
+                "path": f"{args.base_path}/LLaVA-OneVision-Data/figureqa(cauldron,llava_format)",
+                "format": "parquet"
+            }
         },
         
         # Video datasets (33.0% total)
