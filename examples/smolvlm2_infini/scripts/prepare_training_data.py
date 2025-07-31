@@ -65,10 +65,12 @@ pd.set_option('mode.copy_on_write', True)
 class GPUManager:
     """Manages GPU selection and utilization monitoring"""
     
-    def __init__(self):
+    def __init__(self, single_gpu_mode=False):
         self.available_gpus = []
         self.gpu_usage = {}
         self.gpu_lock = threading.Lock()
+        self.single_gpu_mode = single_gpu_mode
+        self.selected_gpu = None
         self._discover_gpus()
     
     def _discover_gpus(self):
@@ -104,7 +106,14 @@ class GPUManager:
                     print(f"GPU {i} busy: {memory_usage:.1f}% memory, {gpu_util}% util - skipping")
             
             if self.available_gpus:
-                print(f"Found {len(self.available_gpus)} available GPUs: {self.available_gpus}")
+                if self.single_gpu_mode:
+                    # Randomly select one GPU from available ones
+                    import random
+                    self.selected_gpu = random.choice(self.available_gpus)
+                    self.available_gpus = [self.selected_gpu]
+                    print(f"Single GPU mode: selected GPU {self.selected_gpu}")
+                else:
+                    print(f"Found {len(self.available_gpus)} available GPUs: {self.available_gpus}")
             else:
                 print("No available GPUs found - all are currently in use")
                 
@@ -113,7 +122,13 @@ class GPUManager:
             try:
                 device_count = cp.cuda.runtime.getDeviceCount()
                 self.available_gpus = list(range(device_count))
-                print(f"Detected {device_count} GPUs, assuming all available")
+                if self.single_gpu_mode and self.available_gpus:
+                    import random
+                    self.selected_gpu = random.choice(self.available_gpus)
+                    self.available_gpus = [self.selected_gpu]
+                    print(f"Single GPU mode: selected GPU {self.selected_gpu} from {device_count} available")
+                else:
+                    print(f"Detected {device_count} GPUs, assuming all available")
             except Exception as e:
                 print(f"GPU detection failed: {e}")
         except Exception as e:
@@ -121,7 +136,13 @@ class GPUManager:
             try:
                 device_count = cp.cuda.runtime.getDeviceCount()
                 self.available_gpus = list(range(device_count))
-                print(f"Fallback: detected {device_count} GPUs")
+                if self.single_gpu_mode and self.available_gpus:
+                    import random
+                    self.selected_gpu = random.choice(self.available_gpus)
+                    self.available_gpus = [self.selected_gpu]
+                    print(f"Fallback single GPU mode: selected GPU {self.selected_gpu}")
+                else:
+                    print(f"Fallback: detected {device_count} GPUs")
             except:
                 pass
     
@@ -131,9 +152,14 @@ class GPUManager:
             if not self.available_gpus:
                 return None
             
-            gpu_id = self.available_gpus[0]
-            self.available_gpus.append(self.available_gpus.pop(0))  # Rotate
-            return gpu_id
+            if self.single_gpu_mode:
+                # Always return the same selected GPU
+                return self.selected_gpu
+            else:
+                # Original rotation behavior for multi-GPU
+                gpu_id = self.available_gpus[0]
+                self.available_gpus.append(self.available_gpus.pop(0))  # Rotate
+                return gpu_id
     
     def release_gpu(self, gpu_id: int):
         """Mark GPU as available again"""
@@ -142,17 +168,21 @@ class GPUManager:
                 self.available_gpus.append(gpu_id)
 
 class GPUAcceleratedDataLoader:
-    def __init__(self, cache_dir: str = ".cache", max_workers: int = None, use_gpu: bool = True):
+    def __init__(self, cache_dir: str = ".cache", max_workers: int = None, use_gpu: bool = True, single_gpu_mode: bool = False):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
         self.max_workers = max_workers or min(mp.cpu_count(), 8)
         self.use_gpu = use_gpu and CUDF_AVAILABLE
-        self.gpu_manager = GPUManager() if self.use_gpu else None
+        self.single_gpu_mode = single_gpu_mode
+        self.gpu_manager = GPUManager(single_gpu_mode=single_gpu_mode) if self.use_gpu else None
         self.gpu_lock = threading.Lock()  # Add GPU synchronization lock
         
         if self.use_gpu and self.gpu_manager.available_gpus:
             self.gpu_available = True
-            print(f"Multi-GPU acceleration enabled with {len(self.gpu_manager.available_gpus)} available GPUs")
+            if self.single_gpu_mode:
+                print(f"Single GPU acceleration enabled on GPU {self.gpu_manager.selected_gpu}")
+            else:
+                print(f"Multi-GPU acceleration enabled with {len(self.gpu_manager.available_gpus)} available GPUs")
             # Initialize RMM once globally to avoid thread-unsafe reinitialization
             self._initialize_rmm_globally()
         else:
@@ -1133,11 +1163,13 @@ def main():
     parser.add_argument("--no_cache", action="store_true", help="Disable caching")
     parser.add_argument("--use_gpu", action="store_true", default=True, help="Use GPU acceleration")
     parser.add_argument("--no_gpu", action="store_true", help="Disable GPU acceleration")
+    parser.add_argument("--single_gpu", action="store_true", help="Use only a single GPU (randomly selected from available)")
     
     args = parser.parse_args()
     
     # Handle GPU settings
     use_gpu = args.use_gpu and not args.no_gpu
+    single_gpu_mode = args.single_gpu
     
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -1146,9 +1178,9 @@ def main():
     
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Initialize multi-GPU accelerated loader
+    # Initialize GPU accelerated loader
     cache_dir = None if args.no_cache else args.cache_dir
-    loader = GPUAcceleratedDataLoader(cache_dir=cache_dir, max_workers=args.workers, use_gpu=use_gpu)
+    loader = GPUAcceleratedDataLoader(cache_dir=cache_dir, max_workers=args.workers, use_gpu=use_gpu, single_gpu_mode=single_gpu_mode)
     
     # Dataset configurations with corrected paths
     datasets_config = [
@@ -1317,7 +1349,11 @@ def main():
     ]
     
     # Process all datasets with performance monitoring
-    print(f"Starting {'multi-GPU accelerated' if use_gpu else 'CPU-optimized'} data preparation...")
+    if use_gpu:
+        gpu_mode = "single GPU" if single_gpu_mode else "multi-GPU accelerated"
+        print(f"Starting {gpu_mode} data preparation...")
+    else:
+        print(f"Starting CPU-optimized data preparation...")
     start_time = time.time()
     
     results = loader.process_datasets_parallel(datasets_config, args.output_dir)
@@ -1329,9 +1365,10 @@ def main():
     total_samples = sum(results.values())
     successful_datasets = len([r for r in results.values() if r > 0])
     
-    print(f"\n{'='*80}")
+    separator = '=' * 80
+    print(f"\n{separator}")
     print(f"{'MULTI-GPU ACCELERATED' if use_gpu else 'OPTIMIZED'} DATA PREPARATION COMPLETE")
-    print(f"{'='*80}")
+    print(f"{separator}")
     print(f"Processing time: {processing_time:.2f} seconds")
     print(f"Successful datasets: {successful_datasets}/{len(datasets_config)}")
     print(f"Total samples: {total_samples:,}")
