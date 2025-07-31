@@ -98,7 +98,8 @@ class GPUManager:
                         'total_memory': info.total // (1024**3),  # GB
                         'free_memory': info.free // (1024**3)    # GB
                     }
-                    print(f"GPU {i} available: {memory_usage:.1f}% memory, {gpu_util}% util, {info.free//(1024**3)}GB free")
+                    free_gb = info.free // (1024**3)
+                    print(f"GPU {i} available: {memory_usage:.1f}% memory, {gpu_util}% util, {free_gb}GB free")
                 else:
                     print(f"GPU {i} busy: {memory_usage:.1f}% memory, {gpu_util}% util - skipping")
             
