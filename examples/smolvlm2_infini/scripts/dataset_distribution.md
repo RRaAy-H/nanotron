@@ -29,7 +29,7 @@ All text datasets are in parquet format and located at `/data1/yihao/LLaVA-OneVi
 | Dataset | Percentage | Format | Path |
 |---------|------------|--------|------|
 | m4-instruct-data/ | 10.4% | ZIP | `/data1/yihao/M4-Instruct-Data` |
-| mammoth/multi_image_data/shard_1.tar.gz | 1.9% | TAR.GZ | `/data1/yihao/MammoTH-VL_Instruct-12M/multi_image_data` |
+| mammoth/multi_image_data/shard_1.tar.gz | 1.9% | TAR.GZ | `/data1/yihao/MAmmoTH-VL-Instruct-12M/multi_image_data` |
 
 ### Image Datasets (34.4% total)
 
@@ -69,3 +69,28 @@ All image datasets are in parquet format and located at `/data1/yihao/LLaVA-OneV
 - **Alternative sampling**: Substitute with specified alternatives when original is unavailable
 - **Composite sampling**: Combine multiple sources with defined proportions
 - **Deduplication**: All sampling strategies require avoiding duplicate samples across datasets
+
+## Dataset Structure Notes (Updated based on server analysis)
+
+**Important Path Corrections:**
+- MammoTH dataset is located at `/data1/yihao/MAmmoTH-VL-Instruct-12M` (note the capitalization)
+- Video data (llava-video-178k) is located at `/data1/yihao/llava-video/` (separate from LLaVA-OneVision-Data)
+- Video subdirectories follow naming pattern: `{duration}_{source}` (e.g., `1_2_m_academic_v0_1`)
+
+**Video Directory Structure:**
+```
+/data1/yihao/llava-video/
+├── 0_30_s_academic_v0_1/
+├── 0_30_s_activitynetqa/
+├── 1_2_m_academic_v0_1/
+├── 2_3_m_academic_v0_1/
+└── ... (other time-based subdirectories)
+```
+
+**Verified Dataset Locations:**
+- ✅ LLaVA-OneVision-Data: `/data1/yihao/LLaVA-OneVision-Data`
+- ✅ M4-Instruct-Data: `/data1/yihao/M4-Instruct-Data`  
+- ✅ ShareGPTVideo: `/data1/yihao/ShareGPTVideo/train_300k`
+- ✅ VISTA-400K: `/data1/yihao/VISTA-400K/two_needle_niah_qa`
+- ✅ MAmmoTH-VL-Instruct-12M: `/data1/yihao/MAmmoTH-VL-Instruct-12M/multi_image_data`
+- ✅ llava-video: `/data1/yihao/llava-video/` (various time-based subdirs)
