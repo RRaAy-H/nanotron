@@ -97,7 +97,6 @@ class CPUOptimizedDataLoader:
             print(f"Loaded {len(cached_data)} samples from cache for {parquet_path}")
             return cached_data
         
-        print(f"Loading {parquet_path} with CPU optimization...")
         
         try:
             parquet_files = []
@@ -503,7 +502,6 @@ class CPUOptimizedDataLoader:
 
     def load_json_data(self, json_path: str, num_samples: int) -> List[Dict[str, Any]]:
         """Load data from a JSON file"""
-        print(f"Loading JSON file {json_path}...")
         samples = []
         
         try:
@@ -530,7 +528,6 @@ class CPUOptimizedDataLoader:
 
     def load_zip_directory_data(self, zip_dir: str, num_samples: int) -> List[Dict[str, Any]]:
         """Load data from directory containing only ZIP files (ignoring JSON files)"""
-        print(f"Loading ZIP directory {zip_dir}...")
         samples = []
         
         if not os.path.exists(zip_dir):
@@ -571,15 +568,27 @@ class CPUOptimizedDataLoader:
         return samples
 
     def load_zip_data(self, zip_path: str, num_samples: int) -> List[Dict[str, Any]]:
-        """Maximum parallel ZIP loading with CPU optimization"""
-        print(f"Loading ZIP archive {zip_path}...")
+        """Enhanced ZIP loading with vision dataset and Arrow format support"""
         samples = []
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
-                json_files = [f for f in zf.namelist() if f.endswith('.json')]
+                file_list = zf.namelist()
+                json_files = [f for f in file_list if f.endswith('.json')]
+                arrow_files = [f for f in file_list if f.endswith('.arrow')]
+                image_files = [f for f in file_list if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff'))]
                 
-                # Parallel JSON processing with maximum workers
+                # Check for Arrow/Parquet dataset (like multi_vqa)
+                if arrow_files and len(arrow_files) >= 1:
+                    print(f"Detected Arrow dataset structure: {len(arrow_files)} Arrow files, {len(image_files)} images")
+                    return self._load_arrow_zip_data(zf, arrow_files, num_samples)
+                
+                # Check if this is a vision dataset (has both JSON and images)
+                elif json_files and image_files and len(image_files) > len(json_files) * 10:
+                    print(f"Detected vision dataset structure: {len(json_files)} JSON files, {len(image_files)} images")
+                    return self._load_vision_zip_data(zf, json_files, image_files, num_samples)
+                
+                # Original logic for datasets with multiple JSON files
                 def process_json_file(json_file):
                     try:
                         with zf.open(json_file) as f:
@@ -609,9 +618,146 @@ class CPUOptimizedDataLoader:
         
         return samples[:num_samples]
 
+    def _load_arrow_zip_data(self, zf: zipfile.ZipFile, arrow_files: List[str], num_samples: int) -> List[Dict[str, Any]]:
+        """Load Arrow/Parquet dataset from ZIP"""
+        samples = []
+        
+        if not PYARROW_AVAILABLE:
+            print("PyArrow not available, cannot load Arrow files")
+            return []
+        
+        import tempfile
+        import os
+        
+        # Find the main data file (usually the largest or with specific names)
+        main_files = [f for f in arrow_files if any(keyword in f.lower() for keyword in ['train', 'data', 'instruct'])]
+        if not main_files:
+            main_files = arrow_files  # Use all if no specific pattern found
+        
+        for arrow_file in main_files[:3]:  # Limit to first 3 files to avoid memory issues
+            try:
+                # Extract Arrow file to temporary location
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.arrow') as tmp_file:
+                    with zf.open(arrow_file) as src:
+                        tmp_file.write(src.read())
+                    tmp_file_path = tmp_file.name
+                
+                # Load Arrow file using PyArrow
+                try:
+                    import pyarrow as pa
+                    with pa.memory_map(tmp_file_path, 'r') as source:
+                        batch_reader = pa.ipc.open_file(source)
+                        table = batch_reader.read_all()
+                        
+                        # Convert to pandas for easier processing
+                        df = table.to_pandas()
+                        
+                        # Limit samples
+                        if len(df) > num_samples:
+                            df = df.sample(n=num_samples, random_state=42)
+                        
+                        # Convert to our format
+                        file_samples = self._df_to_samples_vectorized(df, arrow_file)
+                        samples.extend(file_samples)
+                        
+                        print(f"Loaded {len(file_samples)} samples from Arrow file {arrow_file}")
+                        
+                        if len(samples) >= num_samples:
+                            break
+                        
+                except Exception as arrow_error:
+                    print(f"Error reading Arrow file {arrow_file}: {arrow_error}")
+                    continue
+                    
+                finally:
+                    # Clean up temporary file
+                    if os.path.exists(tmp_file_path):
+                        os.unlink(tmp_file_path)
+                        
+            except Exception as extract_error:
+                print(f"Error extracting Arrow file {arrow_file}: {extract_error}")
+                continue
+        
+        print(f"Loaded {len(samples)} total samples from Arrow dataset")
+        return samples[:num_samples]
+
+    def _load_vision_zip_data(self, zf: zipfile.ZipFile, json_files: List[str], image_files: List[str], num_samples: int) -> List[Dict[str, Any]]:
+        """Load vision dataset with separate JSON annotations and images"""
+        samples = []
+        
+        # Process each JSON file (usually contains annotations)
+        for json_file in json_files:
+            try:
+                with zf.open(json_file) as f:
+                    data = json.load(f)
+                
+                # Handle different JSON structures
+                annotations = []
+                if isinstance(data, list):
+                    annotations = data
+                elif isinstance(data, dict):
+                    # Check common keys for annotation data
+                    for key in ['data', 'annotations', 'samples', 'items']:
+                        if key in data and isinstance(data[key], list):
+                            annotations = data[key]
+                            break
+                    if not annotations and 'annotations' not in data:
+                        # If it's a single annotation object, wrap it
+                        annotations = [data]
+                
+                # Convert annotations to training samples
+                for idx, annotation in enumerate(annotations[:num_samples]):
+                    if len(samples) >= num_samples:
+                        break
+                    
+                    # Create training sample with proper format
+                    sample = {
+                        "id": annotation.get("id", f"{Path(json_file).stem}_{idx}"),
+                        "conversations": []
+                    }
+                    
+                    # Handle different annotation formats
+                    if "question" in annotation and "answer" in annotation:
+                        sample["conversations"] = [
+                            {"from": "human", "value": str(annotation["question"])},
+                            {"from": "gpt", "value": str(annotation["answer"])}
+                        ]
+                    elif "text" in annotation:
+                        sample["conversations"] = [
+                            {"from": "human", "value": "Describe this image."},
+                            {"from": "gpt", "value": str(annotation["text"])}
+                        ]
+                    else:
+                        # Generic fallback
+                        sample["conversations"] = [
+                            {"from": "human", "value": "Describe this image."},
+                            {"from": "gpt", "value": f"This is an image from {Path(json_file).stem}."}
+                        ]
+                    
+                    # Add image reference if available
+                    if "image" in annotation:
+                        sample["image"] = annotation["image"]
+                    elif "image_path" in annotation:
+                        sample["image"] = annotation["image_path"]
+                    elif "filename" in annotation:
+                        sample["image"] = annotation["filename"]
+                    
+                    # Add any additional fields
+                    for key, value in annotation.items():
+                        if key not in ["question", "answer", "text", "image", "image_path", "filename", "id"]:
+                            sample[key] = self._make_json_serializable(value)
+                    
+                    samples.append(sample)
+                    
+            except Exception as e:
+                print(f"Error processing JSON file {json_file}: {e}")
+                continue
+        
+        print(f"Loaded {len(samples)} samples from vision dataset")
+        return samples[:num_samples]
+
     def load_tar_data(self, tar_path: str, num_samples: int) -> List[Dict[str, Any]]:
         """Optimized TAR loading with streaming"""
-        print(f"Loading TAR archive {tar_path}...")
         samples = []
         
         try:
@@ -644,7 +790,6 @@ class CPUOptimizedDataLoader:
 
     def load_tar_directory_data(self, tar_dir: str, num_samples: int) -> List[Dict[str, Any]]:
         """Load data from directory containing multiple tar.gz files"""
-        print(f"Loading TAR directory {tar_dir}...")
         samples = []
         
         if not os.path.exists(tar_dir):
@@ -686,7 +831,6 @@ class CPUOptimizedDataLoader:
 
     def load_composite_data(self, composite_sources: List[Dict], num_samples: int) -> List[Dict[str, Any]]:
         """Load data using composite sampling strategy"""
-        print(f"Loading composite dataset with {len(composite_sources)} sources...")
         all_samples = []
         
         for source in composite_sources:
@@ -725,7 +869,6 @@ class CPUOptimizedDataLoader:
 
     def load_alternative_sampling_data(self, alternative_source: Dict, num_samples: int) -> List[Dict[str, Any]]:
         """Load data using alternative sampling strategy"""
-        print(f"Loading alternative sampling data from {alternative_source['name']}...")
         
         # Use the alternative source instead of the original
         if alternative_source["format"] == "tar":
