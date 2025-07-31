@@ -89,10 +89,11 @@ mkdir -p data/datasets
 python scripts/download_datasets.py --output_dir data/datasets --seed 42
 ```
 
-This will download ~800K samples optimized for 256M parameter training:
-- Image datasets: 640K samples (80%)
-- Video datasets: 100K samples (12.5%)
-- Text datasets: 60K samples (7.5%)
+This will download samples according to the new multimodal dataset distribution:
+- **Image datasets**: 34.4% of total (located at `/data1/yihao/LLaVA-OneVision-Data`)
+- **Video datasets**: 33.0% of total (multiple sources and formats)
+- **Text datasets**: 20.2% of total (parquet format at `/data1/yihao/LLaVA-OneVision-Data`)
+- **Multi-image datasets**: 12.3% of total (ZIP and TAR.GZ formats)
 
 **Note**: The download process may take several hours depending on your internet connection.
 
@@ -107,7 +108,47 @@ python scripts/convert_smolvlm2_data.py \
 
 ### Step 3: Dataset Mixture Configuration
 
-The dataset mixture is already configured in `data/smolvlm2_256m_mixture.yaml` with proper paths.
+The dataset mixture is configured in `data/smolvlm2_256m_mixture.yaml` with the updated dataset distribution:
+- Uses actual data paths (e.g., `/data1/yihao/LLaVA-OneVision-Data`)
+- Includes sampling strategies: direct, composite, and alternative sampling
+- Supports deduplication across datasets
+- Covers all four modalities: text, image, video, and multi-image
+
+#### Dataset Breakdown by Modality:
+
+**Text Datasets (20.2%)** - All in parquet format at `/data1/yihao/LLaVA-OneVision-Data`:
+- magpie_pro(l3_80b_mt): 6.8%
+- magpie_pro(l3_80b_st): 6.8% 
+- magpie_pro(qwen2_72b_st): 5.8%
+- mathqa: 0.9%
+
+**Multi-image Datasets (12.3%)**:
+- m4-instruct-data: 10.4% (ZIP format at `/data1/yihao/M4-Instruct-Data`)
+- mammoth/multi_image_data: 1.9% (TAR.GZ at `/data1/yihao/MammoTH-VL_Instruct-12M/multi_image_data`)
+
+**Image Datasets (34.4%)** - All in parquet format at `/data1/yihao/LLaVA-OneVision-Data`:
+- llava-onevision/other: 17.4% (composite sampling: 70% figureqa+raven, 30% remaining)
+- vision_flan(filtered): 3.9%
+- mavis_math_metagen: 2.6%
+- mavis_math_rule_geo: 2.5%
+- sharegpt4o: 1.7%
+- sharegpt4v(coco): 1.5%
+- image_textualization: 1.3%
+- sharegpt4v(llava): 0.9%
+- MAPQA(MathV360K): 0.9%
+- qa: 0.8% (alternative sampling)
+- textocr(gpt4v): 0.8%
+
+**Video Datasets (33.0%)** - Multiple sources and formats:
+- llava-video-178k/1-2m: 7.3% (MP4 at `/data1/yihao/LLaVA-OneVision-Data`)
+- llava-video-178k/2-3m: 7.0% (MP4 at `/data1/yihao/LLaVA-OneVision-Data`)
+- other-video/combined: 5.7% (alternative sampling)
+- llava-video-178k/hound: 4.4% (MP4 at `/data1/yihao/LLaVA-OneVision-Data`)
+- llava-video-178k/0-30s: 2.4% (MP4 at `/data1/yihao/LLaVA-OneVision-Data`)
+- video-star/starb: 2.2% (alternative sampling)
+- vista-400k/combined: 2.2% (TAR at `/data1/yihao/VISTA-400K/two_needle_niah_qa`)
+- vript/long: 1.0% (alternative sampling)
+- ShareGPT4Video/all: 0.8% (at `/data1/yihao/ShareGPTVideo/train_300k`)
 
 ## Configuration
 
@@ -141,7 +182,7 @@ tokens:
   sequence_length: 2048
 
 # Training steps
-train_steps: 10000  # ~1 epoch with 800K samples
+train_steps: 10000  # Adjust based on actual dataset size from new distribution
 
 # Multi-GPU settings (if applicable)
 parallelism:
@@ -354,7 +395,7 @@ nanotron/src/nanotron/models/smolvlm2_nanotron.py
 This implementation provides a complete pipeline for training SmolVLM2 with Infini-Attention:
 
 1. **Model Integration**: SmolVLM2 adapted for Nanotron with infini-attention
-2. **Data Pipeline**: 800K samples optimized for 256M parameter training
+2. **Data Pipeline**: Multimodal dataset with optimized sampling strategies for training
 3. **Training Scripts**: Single and multi-GPU training support
 4. **Evaluation Tools**: Comprehensive testing and benchmarking
 5. **Extended Context**: Process sequences up to 16K tokens efficiently

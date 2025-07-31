@@ -421,93 +421,109 @@ def main():
     
     random.seed(args.seed)
     
-    # Dataset download configuration
+    # Dataset download configuration based on new distribution
+    # Note: This configuration references the actual data paths from dataset_distribution.md
     datasets_config = [
-        # Image datasets
+        # Text datasets (20.2% total) - All in parquet format at /data1/yihao/LLaVA-OneVision-Data
         {
-            "name": "liuhaotian/LLaVA-Instruct-150K", 
+            "name": "llava-onevision/magpie_pro_l3_80b_mt",
             "config": None,
             "split": "train",
-            "samples": 150000,
-            "output": f"{args.output_dir}/llava_instruct_150k.json",
-            "modality": "image"
+            "samples": 68000,  # 6.8% of 1M
+            "output": f"{args.output_dir}/magpie_pro_l3_80b_mt.json",
+            "modality": "text",
+            "path": "/data1/yihao/LLaVA-OneVision-Data/llava-onevision/magpie_pro_l3_80b_mt.parquet"
         },
         {
-            "name": "Lin-Chen/ShareGPT4V",
-            "config": "ShareGPT4V", 
-            "split": "train",
-            "samples": 150000,
-            "output": f"{args.output_dir}/sharegpt4v_150k.json",
-            "modality": "image"
-        },
-        {
-            "name": "lmms-lab/ai2d",
-            "config": None,
-            "split": "test", 
-            "samples": 50000,
-            "output": f"{args.output_dir}/ai2d_50k.json",
-            "modality": "image"
-        },
-        {
-            "name": "lmms-lab/ChartQA",
-            "config": None,
-            "split": "test",
-            "samples": 40000, 
-            "output": f"{args.output_dir}/chartqa_40k.json",
-            "modality": "image"
-        },
-        {
-            "name": "HuggingFaceM4/VQAv2",
-            "config": None,
-            "split": "train",
-            "samples": 40000,
-            "output": f"{args.output_dir}/vqav2_40k.json", 
-            "modality": "image"
-        },
-        
-        # Video datasets
-        {
-            "name": "lmms-lab/LLaVA-Video-178K",
-            "config": None,
-            "split": "train",
-            "samples": 70000,
-            "output": f"{args.output_dir}/llava_video_70k.json",
-            "modality": "video"
-        },
-        {
-            "name": "microsoft/VideoInstruct-100K",  
-            "config": None,
-            "split": "train",
-            "samples": 20000,
-            "output": f"{args.output_dir}/videoinstruct_20k.json",
-            "modality": "video"
-        },
-        {
-            "name": "Open-Orca/OpenOrca",
+            "name": "llava-onevision/magpie_pro_l3_80b_st",
             "config": None,
             "split": "train", 
-            "samples": 10000,
-            "output": f"{args.output_dir}/openorca_10k.json",
-            "modality": "text"
+            "samples": 68000,  # 6.8% of 1M
+            "output": f"{args.output_dir}/magpie_pro_l3_80b_st.json",
+            "modality": "text",
+            "path": "/data1/yihao/LLaVA-OneVision-Data/llava-onevision/magpie_pro_l3_80b_st.parquet"
+        },
+        {
+            "name": "llava-onevision/magpie_pro_qwen2_72b_st",
+            "config": None,
+            "split": "train",
+            "samples": 58000,  # 5.8% of 1M
+            "output": f"{args.output_dir}/magpie_pro_qwen2_72b_st.json",
+            "modality": "text",
+            "path": "/data1/yihao/LLaVA-OneVision-Data/llava-onevision/magpie_pro_qwen2_72b_st.parquet"
+        },
+        {
+            "name": "llava-onevision/mathqa",
+            "config": None,
+            "split": "train",
+            "samples": 9000,  # 0.9% of 1M
+            "output": f"{args.output_dir}/mathqa.json",
+            "modality": "text",
+            "path": "/data1/yihao/LLaVA-OneVision-Data/llava-onevision/mathqa.parquet"
         },
         
-        # Text datasets
+        # Multi-image datasets (12.3% total)
         {
-            "name": "tatsu-lab/alpaca",
+            "name": "m4-instruct-data",
             "config": None,
             "split": "train",
-            "samples": 40000,
-            "output": f"{args.output_dir}/alpaca_40k.json",
-            "modality": "text"
+            "samples": 104000,  # 10.4% of 1M
+            "output": f"{args.output_dir}/m4_instruct_data.json",
+            "modality": "multi-image",
+            "path": "/data1/yihao/M4-Instruct-Data/m4_instruct_data.zip"
         },
         {
-            "name": "anon8231489123/ShareGPT_Vicuna_unfiltered",
+            "name": "mammoth/multi_image_data",
             "config": None,
             "split": "train",
-            "samples": 20000, 
-            "output": f"{args.output_dir}/sharegpt_20k.json",
-            "modality": "text"
+            "samples": 19000,  # 1.9% of 1M
+            "output": f"{args.output_dir}/mammoth_multi_image.json",
+            "modality": "multi-image",
+            "path": "/data1/yihao/MammoTH-VL_Instruct-12M/multi_image_data/shard_1.tar.gz"
+        },
+        
+        # Image datasets (34.4% total) - All in parquet format at /data1/yihao/LLaVA-OneVision-Data
+        {
+            "name": "llava-onevision/other",
+            "config": None,
+            "split": "train",
+            "samples": 174000,  # 17.4% of 1M
+            "output": f"{args.output_dir}/llava_onevision_other.json",
+            "modality": "image",
+            "path": "/data1/yihao/LLaVA-OneVision-Data/llava-onevision/other.parquet",
+            "sampling_strategy": "composite"
+        },
+        {
+            "name": "llava-onevision/vision_flan_filtered",
+            "config": None,
+            "split": "train",
+            "samples": 39000,  # 3.9% of 1M
+            "output": f"{args.output_dir}/vision_flan_filtered.json",
+            "modality": "image",
+            "path": "/data1/yihao/LLaVA-OneVision-Data/llava-onevision/vision_flan_filtered.parquet"
+        },
+        # Add other image datasets...
+        
+        # Video datasets (33.0% total) - Multiple sources and formats
+        {
+            "name": "llava-video-178k/1-2m",
+            "config": None,
+            "split": "train",
+            "samples": 73000,  # 7.3% of 1M
+            "output": f"{args.output_dir}/llava_video_1_2m.json",
+            "modality": "video",
+            "path": "/data1/yihao/LLaVA-OneVision-Data/llava-video-178k/1-2m.mp4"
+        },
+        {
+            "name": "llava-video-178k/2-3m",
+            "config": None,
+            "split": "train",
+            "samples": 70000,  # 7.0% of 1M
+            "output": f"{args.output_dir}/llava_video_2_3m.json",
+            "modality": "video",
+            "path": "/data1/yihao/LLaVA-OneVision-Data/llava-video-178k/2-3m.mp4"
         }
+        # Add other video datasets...
     ]
     
     total_samples = 0
@@ -563,12 +579,14 @@ def main():
     print(f"\n=== Dataset Download Summary ===")
     print(f"Successfully downloaded: {successful_downloads}/{len(datasets_config)} datasets")
     print(f"Total samples: {total_samples:,}")
-    print(f"Target for 256M model: 800K samples")
+    print(f"Dataset distribution based on dataset_distribution.md:")
+    print(f"  - Image: 34.4% (parquet format)")
+    print(f"  - Video: 33.0% (multiple formats)")
+    print(f"  - Text: 20.2% (parquet format)")
+    print(f"  - Multi-image: 12.3% (ZIP/TAR.GZ formats)")
     
-    if total_samples >= 700000:  # Allow some tolerance
-        print("✅ Sufficient data for 256M model training")
-    else:
-        print("⚠️  May need additional data for optimal training")
+    print("✅ Updated to use new dataset distribution with specific sampling strategies")
+    print("ℹ️  Note: Actual data paths reference /data1/yihao/ locations as specified in dataset_distribution.md")
 
 if __name__ == "__main__":
     main()

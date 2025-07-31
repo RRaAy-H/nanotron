@@ -17,7 +17,7 @@ pip install pillow>=10.0.0 opencv-python-headless>=4.8.0
 # Navigate to this directory
 cd examples/smolvlm2_infini
 
-# Download datasets (800K samples)
+# Download datasets (according to new multimodal distribution)
 python scripts/download_datasets.py --output_dir data/datasets
 
 # Convert to Nanotron format
@@ -65,7 +65,7 @@ python scripts/evaluate_smolvlm2.py \
 
 - **Infini-Attention Integration**: Process sequences up to 16K tokens with 512-token segments
 - **Multimodal Support**: Handles images, videos, and text inputs
-- **Optimized Dataset**: 800K samples carefully balanced for 256M parameter models
+- **Optimized Dataset**: Multimodal samples with specific sampling strategies (34.4% image, 33.0% video, 20.2% text, 12.3% multi-image)
 - **Extended Context**: Efficient long-context processing with memory compression
 - **Comprehensive Evaluation**: Tools for testing model performance
 
@@ -116,10 +116,25 @@ The core model is implemented in:
 
 ## Dataset Composition
 
-Optimized 800K sample mixture:
-- **Image datasets (80%)**: LLaVA-Instruct-150K, ShareGPT4V, AI2D, ChartQA, VQAv2, etc.
-- **Video datasets (12.5%)**: LLaVA-Video, VideoInstruct-100K, OpenOrca
-- **Text datasets (7.5%)**: Alpaca, ShareGPT for instruction following
+Multimodal dataset mixture with specific data sampling strategies:
+
+| Modality | Percentage | Main Sources |
+|----------|------------|-------------|
+| Image | 34.4% | LLaVA-OneVision datasets (parquet format) |
+| Video | 33.0% | LLaVA-Video-178K, VISTA-400K, ShareGPT4Video |
+| Text | 20.2% | Magpie Pro datasets, MathQA (parquet format) |
+| Multi-image | 12.3% | M4-Instruct-Data, MammoTH-VL datasets |
+
+**Key Features:**
+- **Direct sampling**: Use original dataset as specified
+- **Alternative sampling**: Substitute with specified alternatives when original is unavailable
+- **Composite sampling**: Combine multiple sources with defined proportions  
+- **Deduplication**: All sampling strategies avoid duplicate samples across datasets
+
+**Data Locations:**
+- Text & Image: `/data1/yihao/LLaVA-OneVision-Data` (parquet format)
+- Multi-image: `/data1/yihao/M4-Instruct-Data` (ZIP), `/data1/yihao/MammoTH-VL_Instruct-12M` (TAR.GZ)
+- Video: Multiple locations including `/data1/yihao/LLaVA-OneVision-Data`, `/data1/yihao/VISTA-400K`, `/data1/yihao/ShareGPTVideo`
 
 ## Performance
 
