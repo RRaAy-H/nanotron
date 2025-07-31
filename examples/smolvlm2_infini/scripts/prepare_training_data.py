@@ -1,6 +1,6 @@
 """
 Usage:
-    python prepare_training_data.py --output_dir data/datasets --use_gpu --workers 8
+    python prepare_training_data.py --output_dir data/datasets --workers auto
 """
 
 import os
@@ -26,19 +26,7 @@ import warnings
 import threading
 from queue import Queue
 
-# GPU acceleration imports (with fallbacks)
-try:
-    import cudf
-    import cupy as cp
-    import rmm
-    CUDF_AVAILABLE = True
-    print("GPU acceleration available with cuDF/CuPy")
-except ImportError:
-    cudf = None
-    cp = None
-    rmm = None
-    CUDF_AVAILABLE = False
-    print("GPU libraries not available, falling back to CPU-only processing")
+# CPU-optimized processing only
 
 try:
     import pyarrow.parquet as pq
@@ -49,7 +37,7 @@ except ImportError:
     pa = None
     PYARROW_AVAILABLE = False
 
-# CPU-optimized libraries for fallback
+# CPU-optimized libraries
 try:
     import polars as pl
     POLARS_AVAILABLE = True
@@ -58,168 +46,25 @@ except ImportError:
     pl = None
     POLARS_AVAILABLE = False
 
+# Detect CPU cores dynamically
+CPU_CORES = mp.cpu_count()
+print(f"Detected {CPU_CORES} CPU cores for processing")
+
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=FutureWarning)
 pd.set_option('mode.copy_on_write', True)
 
-class GPUManager:
-    """Manages GPU selection and utilization monitoring"""
-    
-    def __init__(self, single_gpu_mode=False):
-        self.available_gpus = []
-        self.gpu_usage = {}
-        self.gpu_lock = threading.Lock()
-        self.single_gpu_mode = single_gpu_mode
-        self.selected_gpu = None
-        self._discover_gpus()
-    
-    def _discover_gpus(self):
-        """Discover available GPUs and check their utilization"""
-        if not CUDF_AVAILABLE:
-            return
-        
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-            device_count = pynvml.nvmlDeviceGetCount()
-            
-            for i in range(device_count):
-                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                
-                # Consider GPU available if memory usage < 20% and utilization < 30%
-                memory_usage = (info.used / info.total) * 100
-                gpu_util = util.gpu
-                
-                if memory_usage < 20 and gpu_util < 30:
-                    self.available_gpus.append(i)
-                    self.gpu_usage[i] = {
-                        'memory_used': memory_usage,
-                        'utilization': gpu_util,
-                        'total_memory': info.total // (1024**3),  # GB
-                        'free_memory': info.free // (1024**3)    # GB
-                    }
-                    free_gb = info.free // (1024**3)
-                    print(f"GPU {i} available: {memory_usage:.1f}% memory, {gpu_util}% util, {free_gb}GB free")
-                else:
-                    print(f"GPU {i} busy: {memory_usage:.1f}% memory, {gpu_util}% util - skipping")
-            
-            if self.available_gpus:
-                if self.single_gpu_mode:
-                    # Randomly select one GPU from available ones
-                    import random
-                    self.selected_gpu = random.choice(self.available_gpus)
-                    self.available_gpus = [self.selected_gpu]
-                    print(f"Single GPU mode: selected GPU {self.selected_gpu}")
-                else:
-                    print(f"Found {len(self.available_gpus)} available GPUs: {self.available_gpus}")
-            else:
-                print("No available GPUs found - all are currently in use")
-                
-        except ImportError:
-            print("pynvml not available, using basic GPU detection")
-            try:
-                device_count = cp.cuda.runtime.getDeviceCount()
-                self.available_gpus = list(range(device_count))
-                if self.single_gpu_mode and self.available_gpus:
-                    import random
-                    self.selected_gpu = random.choice(self.available_gpus)
-                    self.available_gpus = [self.selected_gpu]
-                    print(f"Single GPU mode: selected GPU {self.selected_gpu} from {device_count} available")
-                else:
-                    print(f"Detected {device_count} GPUs, assuming all available")
-            except Exception as e:
-                print(f"GPU detection failed: {e}")
-        except Exception as e:
-            print(f"GPU utilization check failed: {e}")
-            try:
-                device_count = cp.cuda.runtime.getDeviceCount()
-                self.available_gpus = list(range(device_count))
-                if self.single_gpu_mode and self.available_gpus:
-                    import random
-                    self.selected_gpu = random.choice(self.available_gpus)
-                    self.available_gpus = [self.selected_gpu]
-                    print(f"Fallback single GPU mode: selected GPU {self.selected_gpu}")
-                else:
-                    print(f"Fallback: detected {device_count} GPUs")
-            except:
-                pass
-    
-    def get_best_gpu(self) -> Optional[int]:
-        """Get the GPU with lowest utilization"""
-        with self.gpu_lock:
-            if not self.available_gpus:
-                return None
-            
-            if self.single_gpu_mode:
-                # Always return the same selected GPU
-                return self.selected_gpu
-            else:
-                # Original rotation behavior for multi-GPU
-                gpu_id = self.available_gpus[0]
-                self.available_gpus.append(self.available_gpus.pop(0))  # Rotate
-                return gpu_id
-    
-    def release_gpu(self, gpu_id: int):
-        """Mark GPU as available again"""
-        with self.gpu_lock:
-            if gpu_id not in self.available_gpus:
-                self.available_gpus.append(gpu_id)
 
-class GPUAcceleratedDataLoader:
-    def __init__(self, cache_dir: str = ".cache", max_workers: int = None, use_gpu: bool = True, single_gpu_mode: bool = False):
+class CPUOptimizedDataLoader:
+    def __init__(self, cache_dir: str = ".cache", max_workers: int = None):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-        self.max_workers = max_workers or min(mp.cpu_count(), 8)
-        self.use_gpu = use_gpu and CUDF_AVAILABLE
-        self.single_gpu_mode = single_gpu_mode
-        self.gpu_manager = GPUManager(single_gpu_mode=single_gpu_mode) if self.use_gpu else None
-        self.gpu_lock = threading.Lock()  # Add GPU synchronization lock
-        
-        if self.use_gpu and self.gpu_manager.available_gpus:
-            self.gpu_available = True
-            if self.single_gpu_mode:
-                print(f"Single GPU acceleration enabled on GPU {self.gpu_manager.selected_gpu}")
-            else:
-                print(f"Multi-GPU acceleration enabled with {len(self.gpu_manager.available_gpus)} available GPUs")
-            # Initialize RMM once globally to avoid thread-unsafe reinitialization
-            self._initialize_rmm_globally()
-        else:
-            self.gpu_available = False
-            self.use_gpu = False
-            if use_gpu:
-                print("No available GPUs found, falling back to CPU processing")
-    
-    def _initialize_rmm_globally(self):
-        """Initialize RMM once globally for all GPUs to avoid thread-safety issues"""
-        try:
-            if rmm is not None and self.gpu_manager and self.gpu_manager.available_gpus:
-                # Initialize RMM for all available GPUs at once
-                rmm.reinitialize(
-                    devices=self.gpu_manager.available_gpus,
-                    managed_memory=True,
-                    pool_allocator=True,
-                    initial_pool_size=2**29  # 512MB per GPU to be conservative
-                )
-                print(f"Initialized RMM memory pools for GPUs: {self.gpu_manager.available_gpus}")
-        except Exception as e:
-            print(f"Warning: Failed to initialize RMM globally: {e}. GPU operations may be slower.")
+        # Use all available CPU cores for maximum performance
+        self.max_workers = max_workers or CPU_CORES
+        print(f"CPU-optimized processing with {self.max_workers} workers")
     
     def _get_cache_key(self, path: str, num_samples: int) -> str:
-        """Generate cache key with GPU-accelerated hashing if available"""
-        if self.use_gpu and cp is not None:
-            # GPU-accelerated hash computation
-            try:
-                data = f"{path}_{num_samples}".encode()
-                gpu_data = cp.asarray(np.frombuffer(data, dtype=np.uint8))
-                # Use simple hash since cp.hash might not be available
-                hash_val = int(cp.sum(gpu_data).get()) % (2**32)
-                return f"dataset_{hash_val}.pkl"
-            except:
-                pass
-        
-        # CPU fallback
+        """Generate cache key with CPU hashing"""
         path_hash = hashlib.md5(f"{path}_{num_samples}".encode()).hexdigest()
         return f"dataset_{path_hash}.pkl"
     
@@ -244,7 +89,7 @@ class GPUAcceleratedDataLoader:
             print(f"Warning: Could not cache data: {e}")
 
     def load_parquet_data(self, parquet_path: str, num_samples: int) -> List[Dict[str, Any]]:
-        """GPU-accelerated parquet loading with cuDF and multi-GPU support"""
+        """CPU-optimized parquet loading with maximum parallelization"""
         # Check cache first
         cache_key = self._get_cache_key(parquet_path, num_samples)
         cached_data = self._load_from_cache(cache_key)
@@ -252,7 +97,7 @@ class GPUAcceleratedDataLoader:
             print(f"Loaded {len(cached_data)} samples from cache for {parquet_path}")
             return cached_data
         
-        print(f"Loading {parquet_path} with {'multi-GPU' if self.use_gpu else 'CPU'} acceleration...")
+        print(f"Loading {parquet_path} with CPU optimization...")
         
         try:
             parquet_files = []
@@ -268,11 +113,8 @@ class GPUAcceleratedDataLoader:
             if not parquet_files:
                 return []
             
-            # Use GPU-accelerated processing if available
-            if self.use_gpu and len(parquet_files) > 0:
-                samples = self._load_parquet_gpu(parquet_files, num_samples)
-            else:
-                samples = self._load_parquet_cpu_optimized(parquet_files, num_samples)
+            # Use CPU-optimized processing
+            samples = self._load_parquet_cpu_optimized(parquet_files, num_samples)
             
             # Cache the results
             self._save_to_cache(cache_key, samples)
@@ -283,114 +125,6 @@ class GPUAcceleratedDataLoader:
             print(f"Error loading parquet data from {parquet_path}: {e}")
             return []
     
-    def _load_parquet_gpu(self, parquet_files: List[str], num_samples: int) -> List[Dict]:
-        """Multi-GPU accelerated parquet loading with cuDF"""
-        with self.gpu_lock:  # Synchronize GPU access
-            gpu_id = self.gpu_manager.get_best_gpu() if self.gpu_manager else None
-            
-            if gpu_id is None:
-                print("No GPU available, falling back to CPU")
-                return self._load_parquet_cpu_optimized(parquet_files, num_samples)
-        
-        try:
-            # Set GPU device context directly
-            cp.cuda.Device(gpu_id).use()
-            
-            print(f"Using GPU {gpu_id} for parquet processing...")
-            
-            # Estimate total rows using GPU-accelerated metadata reading
-            total_rows = self._estimate_total_rows_gpu(parquet_files)
-            
-            if total_rows <= num_samples * 2:
-                # Load all files with GPU
-                df_list = []
-                for pfile in parquet_files:
-                    try:
-                        gpu_df = cudf.read_parquet(pfile)
-                        df_list.append(gpu_df)
-                    except (UnicodeDecodeError, UnicodeError) as e:
-                        print(f"GPU loading failed for {pfile}: UTF-8 decode error - {e}, trying CPU fallback")
-                        try:
-                            cpu_df = pd.read_parquet(pfile, engine='pyarrow')
-                            gpu_df = cudf.from_pandas(cpu_df)
-                            df_list.append(gpu_df)
-                        except Exception as cpu_e:
-                            print(f"CPU loading also failed for {pfile}: {cpu_e}, skipping file")
-                            continue
-                    except Exception as e:
-                        print(f"GPU loading failed for {pfile}: {e}, trying CPU fallback")
-                        try:
-                            cpu_df = pd.read_parquet(pfile, engine='pyarrow')
-                            gpu_df = cudf.from_pandas(cpu_df)
-                            df_list.append(gpu_df)
-                        except Exception as cpu_e:
-                            print(f"CPU loading also failed for {pfile}: {cpu_e}, skipping file")
-                            continue
-                
-                # Concatenate on GPU
-                if df_list:
-                    combined_df = cudf.concat(df_list, ignore_index=True)
-                    
-                    # GPU-accelerated sampling
-                    if len(combined_df) > num_samples:
-                        # Use GPU random sampling
-                        indices = cp.random.choice(len(combined_df), size=num_samples, replace=False)
-                        combined_df = combined_df.iloc[indices]
-                    
-                    # Convert back to pandas for JSON serialization
-                    pandas_df = combined_df.to_pandas()
-                    samples = self._df_to_samples_vectorized(pandas_df, parquet_files[0])
-                    
-                    # Clean up GPU memory
-                    del combined_df, df_list
-                    if hasattr(cp, 'get_default_memory_pool'):
-                        cp.get_default_memory_pool().free_all_blocks()
-                    
-                    # Release GPU back to pool
-                    with self.gpu_lock:
-                        self.gpu_manager.release_gpu(gpu_id)
-                    
-                    return samples
-            else:
-                # Use chunked GPU processing for large datasets
-                result = self._chunked_gpu_processing(parquet_files, num_samples, total_rows, gpu_id)
-                with self.gpu_lock:
-                    self.gpu_manager.release_gpu(gpu_id)
-                return result
-                
-        except Exception as e:
-            print(f"GPU processing failed on GPU {gpu_id}: {e}, falling back to CPU")
-            if self.gpu_manager and gpu_id is not None:
-                with self.gpu_lock:
-                    self.gpu_manager.release_gpu(gpu_id)
-            return self._load_parquet_cpu_optimized(parquet_files, num_samples)
-        
-        return []
-    
-    def _estimate_total_rows_gpu(self, parquet_files: List[str]) -> int:
-        """GPU-accelerated row estimation"""
-        if not PYARROW_AVAILABLE:
-            return self._estimate_total_rows_cpu(parquet_files)
-        
-        total_rows = 0
-        sample_files = parquet_files[:min(3, len(parquet_files))]
-        
-        try:
-            # Parallel metadata reading
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(sample_files)) as executor:
-                futures = [executor.submit(self._get_parquet_rows, pfile) for pfile in sample_files]
-                for future in concurrent.futures.as_completed(futures):
-                    total_rows += future.result()
-            
-            # Extrapolate to all files
-            if len(parquet_files) > len(sample_files):
-                avg_rows = total_rows / len(sample_files)
-                total_rows = int(avg_rows * len(parquet_files))
-                
-        except Exception:
-            total_rows = self._estimate_total_rows_cpu(parquet_files)
-        
-        return total_rows
     
     def _get_parquet_rows(self, pfile: str) -> int:
         """Get row count from parquet metadata"""
@@ -405,115 +139,19 @@ class GPUAcceleratedDataLoader:
         except Exception:
             return max(1, os.path.getsize(pfile) // 1024)
     
-    def _chunked_gpu_processing(self, parquet_files: List[str], num_samples: int, total_rows: int, gpu_id: int) -> List[Dict]:
-        """GPU-accelerated chunked processing for large datasets"""
-        samples = []
-        rows_seen = 0
-        sampling_ratio = min(1.0, num_samples * 3 / total_rows)
-        
-        # Ensure we're using the correct GPU context
-        with cp.cuda.Device(gpu_id):
-            for pfile in parquet_files:
-                try:
-                    # Read file with cuDF on specific GPU
-                    gpu_df = cudf.read_parquet(pfile)
-                    
-                    # GPU-accelerated sampling
-                    if sampling_ratio < 1.0:
-                        n_sample = max(1, int(len(gpu_df) * sampling_ratio))
-                        indices = cp.random.choice(len(gpu_df), size=n_sample, replace=False)
-                        gpu_df = gpu_df.iloc[indices]
-                    
-                    # Convert to pandas for processing
-                    pandas_df = gpu_df.to_pandas()
-                    chunk_samples = self._df_to_samples_vectorized(pandas_df, pfile)
-                    
-                    # Reservoir sampling
-                    for sample in chunk_samples:
-                        if len(samples) < num_samples:
-                            samples.append(sample)
-                        else:
-                            j = random.randint(0, rows_seen)
-                            if j < num_samples:
-                                samples[j] = sample
-                        rows_seen += 1
-                    
-                    # Clean up GPU memory
-                    del gpu_df, pandas_df
-                    
-                    if len(samples) >= num_samples:
-                        break
-                        
-                except (UnicodeDecodeError, UnicodeError) as e:
-                    print(f"GPU chunk processing failed for {pfile}: UTF-8 decode error - {e}, trying CPU fallback")
-                    try:
-                        cpu_df = pd.read_parquet(pfile, engine='pyarrow')
-                        if sampling_ratio < 1.0:
-                            n_sample = max(1, int(len(cpu_df) * sampling_ratio))
-                            cpu_df = cpu_df.sample(n=n_sample, random_state=42) if len(cpu_df) > n_sample else cpu_df
-                        
-                        chunk_samples = self._df_to_samples_vectorized(cpu_df, pfile)
-                        
-                        # Reservoir sampling
-                        for sample in chunk_samples:
-                            if len(samples) < num_samples:
-                                samples.append(sample)
-                            else:
-                                j = random.randint(0, rows_seen)
-                                if j < num_samples:
-                                    samples[j] = sample
-                            rows_seen += 1
-                        
-                        if len(samples) >= num_samples:
-                            break
-                    except Exception as cpu_e:
-                        print(f"CPU fallback also failed for {pfile}: {cpu_e}, skipping file")
-                        continue
-                except Exception as e:
-                    print(f"GPU chunk processing failed for {pfile}: {e}, trying CPU fallback")
-                    try:
-                        cpu_df = pd.read_parquet(pfile, engine='pyarrow')
-                        if sampling_ratio < 1.0:
-                            n_sample = max(1, int(len(cpu_df) * sampling_ratio))
-                            cpu_df = cpu_df.sample(n=n_sample, random_state=42) if len(cpu_df) > n_sample else cpu_df
-                        
-                        chunk_samples = self._df_to_samples_vectorized(cpu_df, pfile)
-                        
-                        # Reservoir sampling
-                        for sample in chunk_samples:
-                            if len(samples) < num_samples:
-                                samples.append(sample)
-                            else:
-                                j = random.randint(0, rows_seen)
-                                if j < num_samples:
-                                    samples[j] = sample
-                            rows_seen += 1
-                        
-                        if len(samples) >= num_samples:
-                            break
-                    except Exception as cpu_e:
-                        print(f"CPU fallback also failed for {pfile}: {cpu_e}, skipping file")
-                        continue
-            
-            # Final GPU memory cleanup
-            if hasattr(cp, 'get_default_memory_pool'):
-                cp.get_default_memory_pool().free_all_blocks()
-        
-        return samples[:num_samples]
-    
     def _load_parquet_cpu_optimized(self, parquet_files: List[str], num_samples: int) -> List[Dict]:
-        """CPU-optimized processing with Polars when available"""
+        """CPU-optimized processing with maximum parallelization"""
         total_rows = self._estimate_total_rows_cpu(parquet_files)
         
         # Use Polars for faster CPU processing if available
         if POLARS_AVAILABLE and len(parquet_files) > 0:
             return self._load_parquet_polars(parquet_files, num_samples, total_rows)
         
-        # Fallback to pandas with optimizations
+        # Fallback to pandas with maximum parallelization
         if total_rows <= num_samples * 2:
-            # Parallel loading for multiple files
+            # Parallel loading with all available CPU cores
             if len(parquet_files) > 1:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(parquet_files))) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(parquet_files))) as executor:
                     dfs = list(tqdm(
                         executor.map(pd.read_parquet, parquet_files),
                         total=len(parquet_files),
@@ -661,36 +299,49 @@ class GPUAcceleratedDataLoader:
         return []
     
     def _chunked_cpu_processing(self, parquet_files: List[str], num_samples: int, total_rows: int) -> List[Dict]:
-        """CPU chunked processing with reservoir sampling"""
+        """CPU chunked processing with maximum parallelization and reservoir sampling"""
         samples = []
         rows_seen = 0
         sampling_ratio = min(1.0, num_samples * 3 / total_rows)
         
-        for pfile in parquet_files:
+        # Process files in parallel chunks
+        def process_file_chunk(pfile):
+            file_samples = []
             try:
                 # Read in chunks for memory efficiency
-                for chunk in pd.read_parquet(pfile, chunksize=10000):
+                chunk_size = max(1000, 50000 // self.max_workers)  # Adjust chunk size based on workers
+                for chunk in pd.read_parquet(pfile, chunksize=chunk_size):
                     if sampling_ratio < 1.0:
                         n_sample = max(1, int(len(chunk) * sampling_ratio))
                         chunk = chunk.sample(n=n_sample, random_state=42)
                     
                     chunk_samples = self._df_to_samples_vectorized(chunk, pfile)
-                    
-                    for sample in chunk_samples:
-                        if len(samples) < num_samples:
-                            samples.append(sample)
-                        else:
-                            j = random.randint(0, rows_seen)
-                            if j < num_samples:
-                                samples[j] = sample
-                        rows_seen += 1
-                        
-                if len(samples) >= num_samples:
-                    break
+                    file_samples.extend(chunk_samples)
                     
             except Exception as e:
                 print(f"Error processing {pfile}: {e}")
-                continue
+            
+            return file_samples
+        
+        # Process files in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(parquet_files))) as executor:
+            future_to_file = {executor.submit(process_file_chunk, pfile): pfile for pfile in parquet_files}
+            
+            for future in concurrent.futures.as_completed(future_to_file):
+                file_samples = future.result()
+                
+                # Reservoir sampling
+                for sample in file_samples:
+                    if len(samples) < num_samples:
+                        samples.append(sample)
+                    else:
+                        j = random.randint(0, rows_seen)
+                        if j < num_samples:
+                            samples[j] = sample
+                    rows_seen += 1
+                
+                if len(samples) >= num_samples:
+                    break
         
         return samples[:num_samples]
     
@@ -731,12 +382,12 @@ class GPUAcceleratedDataLoader:
                 return str(obj)  # Convert to string as fallback
     
     def _df_to_samples_vectorized(self, df: pd.DataFrame, source_file: str) -> List[Dict]:
-        """Vectorized conversion with GPU acceleration where possible"""
+        """Vectorized conversion optimized for CPU processing"""
         samples = []
         file_stem = Path(source_file).stem
         
-        # Process in batches for memory efficiency
-        batch_size = 1000
+        # Process in larger batches for better CPU utilization
+        batch_size = max(1000, 10000 // self.max_workers)  # Adjust batch size based on workers
         for i in range(0, len(df), batch_size):
             batch = df.iloc[i:i+batch_size]
             
@@ -764,7 +415,7 @@ class GPUAcceleratedDataLoader:
         return samples
 
     def load_video_data(self, video_path: str, num_samples: int, dataset_name: str, video_filter: str = None) -> List[Dict[str, Any]]:
-        """GPU-accelerated video data loading with parallel directory scanning"""
+        """CPU-optimized video data loading with maximum parallel directory scanning"""
         print(f"Processing video dataset {dataset_name} from {video_path}...")
         
         if not os.path.exists(video_path):
@@ -780,34 +431,12 @@ class GPUAcceleratedDataLoader:
                 "id": f"{dataset_name}_0"
             }]
         
-        # Parallel directory scanning with GPU-accelerated file operations
+        # Parallel directory scanning with maximum CPU utilization
         video_files = self._find_video_files_parallel(video_path, video_filter)
         
-        # GPU-accelerated sampling if available
+        # CPU random sampling
         if len(video_files) > num_samples:
-            if self.use_gpu and cp is not None:
-                with self.gpu_lock:
-                    gpu_id = self.gpu_manager.get_best_gpu()
-                
-                if gpu_id is not None:
-                    try:
-                        with cp.cuda.Device(gpu_id):
-                            # GPU random sampling
-                            indices = cp.random.choice(len(video_files), size=num_samples, replace=False)
-                            video_files = [video_files[i] for i in cp.asnumpy(indices)]
-                        
-                        with self.gpu_lock:
-                            self.gpu_manager.release_gpu(gpu_id)
-                    except Exception as e:
-                        print(f"GPU sampling failed: {e}, using CPU fallback")
-                        video_files = random.sample(video_files, num_samples)
-                        if gpu_id is not None:
-                            with self.gpu_lock:
-                                self.gpu_manager.release_gpu(gpu_id)
-                else:
-                    video_files = random.sample(video_files, num_samples)
-            else:
-                video_files = random.sample(video_files, num_samples)
+            video_files = random.sample(video_files, num_samples)
         
         # Generate samples efficiently
         samples = []
@@ -825,7 +454,7 @@ class GPUAcceleratedDataLoader:
         return samples
     
     def _find_video_files_parallel(self, video_path: str, video_filter: str = None) -> List[Path]:
-        """Parallel video file discovery with GPU acceleration"""
+        """Maximum parallel video file discovery using all CPU cores"""
         path = Path(video_path)
         
         # Determine search directories
@@ -837,13 +466,13 @@ class GPUAcceleratedDataLoader:
         if not search_dirs:
             return []
         
-        # Parallel file discovery
+        # Parallel file discovery with maximum CPU utilization
         def find_videos_in_dir(search_dir):
             video_files = []
             extensions = ['.mp4', '.avi', '.mov', '.mkv']
             
-            # Use parallel glob operations
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(extensions)) as executor:
+            # Use maximum parallel glob operations
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(extensions))) as executor:
                 futures = [executor.submit(lambda ext: list(search_dir.rglob(f'*{ext}')), ext) 
                           for ext in extensions]
                 for future in concurrent.futures.as_completed(futures):
@@ -851,9 +480,9 @@ class GPUAcceleratedDataLoader:
             
             return video_files
         
-        # Parallel processing of search directories
+        # Parallel processing of search directories with maximum workers
         if len(search_dirs) > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(search_dirs))) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(search_dirs))) as executor:
                 results = list(executor.map(find_videos_in_dir, search_dirs))
                 video_files = [f for result in results for f in result]
         else:
@@ -931,15 +560,15 @@ class GPUAcceleratedDataLoader:
         return samples
 
     def load_zip_data(self, zip_path: str, num_samples: int) -> List[Dict[str, Any]]:
-        """Optimized ZIP loading with streaming"""
+        """Maximum parallel ZIP loading with CPU optimization"""
         print(f"Loading ZIP archive {zip_path}...")
         samples = []
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
-                json_files = [f for f in zf.namelist() if f.endswith('.json')][:10]
+                json_files = [f for f in zf.namelist() if f.endswith('.json')]
                 
-                # Parallel JSON processing
+                # Parallel JSON processing with maximum workers
                 def process_json_file(json_file):
                     try:
                         with zf.open(json_file) as f:
@@ -952,7 +581,7 @@ class GPUAcceleratedDataLoader:
                         return []
                 
                 if len(json_files) > 1:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(json_files))) as executor:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(json_files))) as executor:
                         results = list(executor.map(process_json_file, json_files))
                         for result in results:
                             samples.extend(result)
@@ -1045,10 +674,8 @@ class GPUAcceleratedDataLoader:
         return samples
 
     def process_datasets_parallel(self, datasets_config: List[Dict], output_dir: str) -> Dict[str, int]:
-        """Process multiple datasets in parallel with multi-GPU acceleration"""
-        print(f"Processing {len(datasets_config)} datasets with {self.max_workers} workers...")
-        if self.use_gpu:
-            print(f"Multi-GPU acceleration enabled with {len(self.gpu_manager.available_gpus)} GPUs")
+        """Process multiple datasets in parallel with maximum CPU utilization"""
+        print(f"Processing {len(datasets_config)} datasets with {self.max_workers} CPU workers...")
         
         # Filter out already processed datasets
         pending_configs = []
@@ -1066,7 +693,7 @@ class GPUAcceleratedDataLoader:
         if not pending_configs:
             return results
         
-        # Process datasets in parallel
+        # Process datasets in parallel with maximum CPU utilization
         process_func = partial(self._process_single_dataset)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -1082,7 +709,7 @@ class GPUAcceleratedDataLoader:
                         pbar.set_postfix({
                             "current": config["name"][:20], 
                             "samples": f"{sample_count:,}",
-                            "mode": "GPU" if self.use_gpu else "CPU"
+                            "mode": "CPU"
                         })
                     except Exception as e:
                         print(f"Error processing {config['name']}: {e}")
@@ -1092,7 +719,7 @@ class GPUAcceleratedDataLoader:
         return results
     
     def _process_single_dataset(self, config: Dict) -> int:
-        """Process a single dataset configuration with multi-GPU acceleration"""
+        """Process a single dataset configuration with maximum CPU optimization"""
         try:
             samples = []
             
@@ -1154,33 +781,24 @@ class GPUAcceleratedDataLoader:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-GPU Accelerated Training Data Preparation")
+    parser = argparse.ArgumentParser(description="CPU-Optimized Training Data Preparation")
     parser.add_argument("--output_dir", default="data/datasets", help="Output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--base_path", default="/data1/yihao", help="Base path for datasets")
-    parser.add_argument("--workers", type=int, default=None, help="Number of parallel workers")
+    parser.add_argument("--workers", type=int, default=None, help="Number of parallel workers (default: auto-detect CPU cores)")
     parser.add_argument("--cache_dir", default=".cache", help="Cache directory")
     parser.add_argument("--no_cache", action="store_true", help="Disable caching")
-    parser.add_argument("--use_gpu", action="store_true", default=True, help="Use GPU acceleration")
-    parser.add_argument("--no_gpu", action="store_true", help="Disable GPU acceleration")
-    parser.add_argument("--single_gpu", action="store_true", help="Use only a single GPU (randomly selected from available)")
     
     args = parser.parse_args()
     
-    # Handle GPU settings
-    use_gpu = args.use_gpu and not args.no_gpu
-    single_gpu_mode = args.single_gpu
-    
     random.seed(args.seed)
     np.random.seed(args.seed)
-    if use_gpu and cp is not None:
-        cp.random.seed(args.seed)
     
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Initialize GPU accelerated loader
+    # Initialize CPU optimized loader
     cache_dir = None if args.no_cache else args.cache_dir
-    loader = GPUAcceleratedDataLoader(cache_dir=cache_dir, max_workers=args.workers, use_gpu=use_gpu, single_gpu_mode=single_gpu_mode)
+    loader = CPUOptimizedDataLoader(cache_dir=cache_dir, max_workers=args.workers)
     
     # Dataset configurations with corrected paths
     datasets_config = [
@@ -1349,11 +967,7 @@ def main():
     ]
     
     # Process all datasets with performance monitoring
-    if use_gpu:
-        gpu_mode = "single GPU" if single_gpu_mode else "multi-GPU accelerated"
-        print(f"Starting {gpu_mode} data preparation...")
-    else:
-        print(f"Starting CPU-optimized data preparation...")
+    print(f"Starting CPU-optimized data preparation with {loader.max_workers} workers...")
     start_time = time.time()
     
     results = loader.process_datasets_parallel(datasets_config, args.output_dir)
@@ -1367,18 +981,14 @@ def main():
     
     separator = '=' * 80
     print(f"\n{separator}")
-    print(f"{'MULTI-GPU ACCELERATED' if use_gpu else 'OPTIMIZED'} DATA PREPARATION COMPLETE")
+    print(f"CPU-OPTIMIZED DATA PREPARATION COMPLETE")
     print(f"{separator}")
     print(f"Processing time: {processing_time:.2f} seconds")
     print(f"Successful datasets: {successful_datasets}/{len(datasets_config)}")
     print(f"Total samples: {total_samples:,}")
     print(f"Average speed: {total_samples/processing_time:.0f} samples/second")
     print(f"Output directory: {args.output_dir}")
-    
-    if use_gpu and loader.gpu_manager:
-        print(f"Multi-GPU acceleration: {'Enabled' if loader.gpu_available else 'Failed (CPU fallback)'}")
-        if loader.gpu_available:
-            print(f"Available GPUs used: {loader.gpu_manager.available_gpus}")
+    print(f"CPU workers used: {loader.max_workers}/{CPU_CORES} cores")
     
     # Modality breakdown
     modality_stats = defaultdict(int)
@@ -1396,8 +1006,8 @@ def main():
         print(f"\nPerformance Analysis:")
         print(f"  - Datasets per minute: {successful_datasets * 60 / processing_time:.1f}")
         print(f"  - MB processed per second: {total_samples * 0.001 / processing_time:.1f}")
-        if use_gpu and loader.gpu_available:
-            print(f"  - Multi-GPU utilization: Enabled across {len(loader.gpu_manager.available_gpus)} GPUs")
+        print(f"  - CPU utilization: {loader.max_workers} workers across {CPU_CORES} cores")
+        print(f"  - CPU efficiency: {(loader.max_workers / CPU_CORES * 100):.1f}% core utilization")
 
 
 if __name__ == "__main__":
