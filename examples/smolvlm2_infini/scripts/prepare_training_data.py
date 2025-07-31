@@ -262,9 +262,7 @@ class GPUAcceleratedDataLoader:
                 return self._load_parquet_cpu_optimized(parquet_files, num_samples)
         
         try:
-            # Set GPU device and ensure proper context
-            import os
-            os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+            # Set GPU device context directly
             cp.cuda.Device(gpu_id).use()
             
             print(f"Using GPU {gpu_id} for parquet processing...")
@@ -279,11 +277,24 @@ class GPUAcceleratedDataLoader:
                     try:
                         gpu_df = cudf.read_parquet(pfile)
                         df_list.append(gpu_df)
+                    except (UnicodeDecodeError, UnicodeError) as e:
+                        print(f"GPU loading failed for {pfile}: UTF-8 decode error - {e}, trying CPU fallback")
+                        try:
+                            cpu_df = pd.read_parquet(pfile, engine='pyarrow')
+                            gpu_df = cudf.from_pandas(cpu_df)
+                            df_list.append(gpu_df)
+                        except Exception as cpu_e:
+                            print(f"CPU loading also failed for {pfile}: {cpu_e}, skipping file")
+                            continue
                     except Exception as e:
                         print(f"GPU loading failed for {pfile}: {e}, trying CPU fallback")
-                        cpu_df = pd.read_parquet(pfile)
-                        gpu_df = cudf.from_pandas(cpu_df)
-                        df_list.append(gpu_df)
+                        try:
+                            cpu_df = pd.read_parquet(pfile, engine='pyarrow')
+                            gpu_df = cudf.from_pandas(cpu_df)
+                            df_list.append(gpu_df)
+                        except Exception as cpu_e:
+                            print(f"CPU loading also failed for {pfile}: {cpu_e}, skipping file")
+                            continue
                 
                 # Concatenate on GPU
                 if df_list:
@@ -402,9 +413,56 @@ class GPUAcceleratedDataLoader:
                     if len(samples) >= num_samples:
                         break
                         
+                except (UnicodeDecodeError, UnicodeError) as e:
+                    print(f"GPU chunk processing failed for {pfile}: UTF-8 decode error - {e}, trying CPU fallback")
+                    try:
+                        cpu_df = pd.read_parquet(pfile, engine='pyarrow')
+                        if sampling_ratio < 1.0:
+                            n_sample = max(1, int(len(cpu_df) * sampling_ratio))
+                            cpu_df = cpu_df.sample(n=n_sample, random_state=42) if len(cpu_df) > n_sample else cpu_df
+                        
+                        chunk_samples = self._df_to_samples_vectorized(cpu_df, pfile)
+                        
+                        # Reservoir sampling
+                        for sample in chunk_samples:
+                            if len(samples) < num_samples:
+                                samples.append(sample)
+                            else:
+                                j = random.randint(0, rows_seen)
+                                if j < num_samples:
+                                    samples[j] = sample
+                            rows_seen += 1
+                        
+                        if len(samples) >= num_samples:
+                            break
+                    except Exception as cpu_e:
+                        print(f"CPU fallback also failed for {pfile}: {cpu_e}, skipping file")
+                        continue
                 except Exception as e:
-                    print(f"GPU chunk processing failed for {pfile}: {e}")
-                    continue
+                    print(f"GPU chunk processing failed for {pfile}: {e}, trying CPU fallback")
+                    try:
+                        cpu_df = pd.read_parquet(pfile, engine='pyarrow')
+                        if sampling_ratio < 1.0:
+                            n_sample = max(1, int(len(cpu_df) * sampling_ratio))
+                            cpu_df = cpu_df.sample(n=n_sample, random_state=42) if len(cpu_df) > n_sample else cpu_df
+                        
+                        chunk_samples = self._df_to_samples_vectorized(cpu_df, pfile)
+                        
+                        # Reservoir sampling
+                        for sample in chunk_samples:
+                            if len(samples) < num_samples:
+                                samples.append(sample)
+                            else:
+                                j = random.randint(0, rows_seen)
+                                if j < num_samples:
+                                    samples[j] = sample
+                            rows_seen += 1
+                        
+                        if len(samples) >= num_samples:
+                            break
+                    except Exception as cpu_e:
+                        print(f"CPU fallback also failed for {pfile}: {cpu_e}, skipping file")
+                        continue
             
             # Final GPU memory cleanup
             if hasattr(cp, 'get_default_memory_pool'):
@@ -605,6 +663,42 @@ class GPUAcceleratedDataLoader:
         
         return samples[:num_samples]
     
+    def _make_json_serializable(self, obj):
+        """Recursively convert all objects to JSON serializable format"""
+        import base64
+        
+        if isinstance(obj, bytes):
+            try:
+                # Try to decode as UTF-8 first
+                return obj.decode('utf-8')
+            except UnicodeDecodeError:
+                # If it's binary data (like images), convert to base64
+                return {
+                    "data": base64.b64encode(obj).decode('ascii'),
+                    "encoding": "base64"
+                }
+        elif isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: self._make_json_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._make_json_serializable(item) for item in obj]
+        elif hasattr(obj, '__dict__'):  # Handle objects with attributes
+            try:
+                return str(obj)  # Convert to string as fallback
+            except:
+                return "<non-serializable-object>"
+        else:
+            # For other types, try to serialize directly
+            try:
+                import json
+                json.dumps(obj)  # Test if it's serializable
+                return obj
+            except (TypeError, ValueError):
+                return str(obj)  # Convert to string as fallback
+    
     def _df_to_samples_vectorized(self, df: pd.DataFrame, source_file: str) -> List[Dict]:
         """Vectorized conversion with GPU acceleration where possible"""
         samples = []
@@ -619,18 +713,6 @@ class GPUAcceleratedDataLoader:
             batch_dict = batch.to_dict('records')
             
             for idx, sample in enumerate(batch_dict):
-                # Convert bytes to base64 strings for JSON serialization
-                for key, value in list(sample.items()):
-                    if isinstance(value, bytes):
-                        try:
-                            # Try to decode as UTF-8 first
-                            sample[key] = value.decode('utf-8')
-                        except UnicodeDecodeError:
-                            # If it's binary data (like images), convert to base64
-                            import base64
-                            sample[key] = base64.b64encode(value).decode('ascii')
-                            sample[f"{key}_encoding"] = "base64"
-                
                 # Fast conversation format check
                 if "conversations" not in sample:
                     if "question" in sample and "answer" in sample:
@@ -643,12 +725,8 @@ class GPUAcceleratedDataLoader:
                 if "id" not in sample:
                     sample["id"] = f"{file_stem}_{i + idx}"
                 
-                # Ensure all values are JSON serializable
-                for key, value in sample.items():
-                    if isinstance(value, (np.integer, np.floating)):
-                        sample[key] = value.item()
-                    elif isinstance(value, np.ndarray):
-                        sample[key] = value.tolist()
+                # Ensure all objects are JSON serializable using recursive conversion
+                sample = self._make_json_serializable(sample)
                 
                 samples.append(sample)
         
