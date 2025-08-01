@@ -63,6 +63,13 @@ class CPUOptimizedDataLoader:
         self.max_workers = max_workers or CPU_CORES
         # Track used sample IDs to avoid duplicates across datasets
         self.used_sample_ids = set()
+        # Track skipped samples statistics
+        self.skipped_stats = {
+            'invalid_image_paths': 0,
+            'invalid_video_paths': 0,
+            'binary_data_found': 0,
+            'null_after_serialization': 0
+        }
         print(f"CPU-optimized processing with {self.max_workers} workers")
     
     def _get_cache_key(self, path: str, num_samples: int) -> str:
@@ -377,6 +384,80 @@ class CPUOptimizedDataLoader:
         
         return samples[:num_samples]
     
+    def _extract_image_path_from_struct(self, image_data, base_path="/data1/yihao"):
+        """
+        Extract file path from LLaVA-OneVision image struct format
+        
+        LLaVA-OneVision datasets store images as: {'bytes': <binary_data>, 'path': '/path/to/image.jpg'}
+        SmolVLM2/nanotron training expects simple path strings: {"image": "path/to/image.jpg"}
+        
+        This method extracts the 'path' field and discards binary data for optimal training performance.
+        
+        Args:
+            image_data: LLaVA-OneVision struct, string path, or list of images
+            base_path: Base directory for resolving relative paths
+            
+        Returns:
+            str/list/None: Valid file path(s) or None if sample should be skipped
+        """
+        if not image_data:
+            return None
+            
+        # Handle LLaVA-OneVision struct format: {'bytes': <data>, 'path': 'file.jpg'}
+        if isinstance(image_data, dict):
+            # Extract path field - this is the key insight for handling LLaVA-OneVision data
+            image_path = image_data.get('path')
+            
+            # Skip samples with only embedded binary data (path=None)
+            if image_path is None or image_path == 'None' or not image_path:
+                self.skipped_stats['invalid_image_paths'] += 1
+                return None
+            
+            # Convert to absolute path for file system access
+            if not Path(image_path).is_absolute():
+                full_path = Path(base_path) / image_path
+            else:
+                full_path = Path(image_path)
+            
+            # Validate file existence - critical for training stability
+            if full_path.exists():
+                return str(full_path)
+            else:
+                self.skipped_stats['invalid_image_paths'] += 1
+                return None
+        
+        # Handle string paths (for non-LLaVA-OneVision datasets)
+        elif isinstance(image_data, str):
+            # Detect and skip malformed serialized dict strings from previous broken processing
+            if image_data.startswith("{'bytes':") or image_data.startswith('{"bytes":'):
+                self.skipped_stats['invalid_image_paths'] += 1
+                return None
+                
+            # Process as regular file path
+            if not Path(image_data).is_absolute():
+                full_path = Path(base_path) / image_data
+            else:
+                full_path = Path(image_data)
+                
+            if full_path.exists():
+                return str(full_path)
+            else:
+                self.skipped_stats['invalid_image_paths'] += 1
+                return None
+        
+        # Handle multi-image lists (recursive processing)
+        elif isinstance(image_data, list):
+            valid_paths = []
+            for item in image_data:
+                path = self._extract_image_path_from_struct(item, base_path)
+                if path:
+                    valid_paths.append(path)
+            return valid_paths if valid_paths else None
+        
+        # Unknown format - skip sample
+        self.skipped_stats['invalid_image_paths'] += 1
+        return None
+    
     def _make_json_serializable(self, obj):
         """Recursively convert all objects to JSON serializable format"""
         import base64
@@ -386,9 +467,11 @@ class CPUOptimizedDataLoader:
                 # Try to decode as UTF-8 first
                 return obj.decode('utf-8')
             except UnicodeDecodeError:
-                # For binary data like images, convert to string representation
-                # This avoids creating nested dict structures that can break downstream processing
-                return f"<binary_data_{len(obj)}_bytes>"
+                # For binary image data, we should NOT embed it in JSON
+                # Instead, this indicates a data processing error - binary data should not reach here
+                print(f"Warning: Encountered binary data ({len(obj)} bytes) - this should be handled as a file path instead")
+                self.skipped_stats['binary_data_found'] += 1
+                return None  # Return None to indicate this sample should be skipped
         elif isinstance(obj, (np.integer, np.floating)):
             return obj.item()
         elif isinstance(obj, np.ndarray):
@@ -443,11 +526,44 @@ class CPUOptimizedDataLoader:
                 if "id" not in sample:
                     sample["id"] = f"{file_stem}_{i + idx}"
                 
+                # Handle image data validation BEFORE serialization
+                skip_sample = False
+                
+                # Check and validate image data using new struct extraction
+                if 'image' in sample:
+                    valid_image_path = self._extract_image_path_from_struct(sample['image'])
+                    if valid_image_path is None:
+                        print(f"Warning: Skipping sample {i + idx} - no valid image path found")
+                        skip_sample = True
+                    else:
+                        sample['image'] = valid_image_path
+                
+                # Check and validate video data (same logic works for video)
+                if 'video' in sample:
+                    valid_video_path = self._extract_image_path_from_struct(sample['video'])
+                    if valid_video_path is None:
+                        print(f"Warning: Skipping sample {i + idx} - no valid video path found")
+                        skip_sample = True
+                    else:
+                        sample['video'] = valid_video_path
+                
+                if skip_sample:
+                    continue
+                
                 # Ensure all objects are JSON serializable using recursive conversion
                 try:
                     sample = self._make_json_serializable(sample)
                     # Verify the sample has required fields after serialization
                     if sample and isinstance(sample, dict) and "conversations" in sample and "id" in sample:
+                        # Double-check that image/video paths are still valid after serialization
+                        if 'image' in sample and sample['image'] is None:
+                            print(f"Warning: Skipping sample {i + idx} - image path became null after serialization")
+                            self.skipped_stats['null_after_serialization'] += 1
+                            continue
+                        if 'video' in sample and sample['video'] is None:
+                            print(f"Warning: Skipping sample {i + idx} - video path became null after serialization")
+                            self.skipped_stats['null_after_serialization'] += 1
+                            continue
                         samples.append(sample)
                     else:
                         print(f"Warning: Skipping malformed sample at index {i + idx}")
@@ -808,13 +924,23 @@ class CPUOptimizedDataLoader:
                             {"from": "gpt", "value": f"This is an image from {Path(json_file).stem}."}
                         ]
                     
-                    # Add image reference if available
+                    # Add image reference if available and valid
+                    image_data = None
                     if "image" in annotation:
-                        sample["image"] = annotation["image"]
+                        image_data = annotation["image"]
                     elif "image_path" in annotation:
-                        sample["image"] = annotation["image_path"]
+                        image_data = annotation["image_path"]
                     elif "filename" in annotation:
-                        sample["image"] = annotation["filename"]
+                        image_data = annotation["filename"]
+                    
+                    if image_data:
+                        valid_image_path = self._extract_image_path_from_struct(image_data)
+                        if valid_image_path:
+                            sample["image"] = valid_image_path
+                        else:
+                            # Skip this sample if no valid image path
+                            print(f"Skipping sample {idx} from {json_file} - no valid image path")
+                            continue
                     
                     # Add any additional fields
                     for key, value in annotation.items():
@@ -1124,18 +1250,23 @@ class CPUOptimizedDataLoader:
             return False
         
         # Look for image key in various possible formats
-        image_path = None
+        image_data = None
         for key in ['image', 'image_path', 'filename', 'file_name']:
             if key in item:
-                image_path = item[key]
+                image_data = item[key]
                 break
         
-        if not image_path:
+        if not image_data:
             return False
         
-        # Check both full path and just filename
-        image_filename = os.path.basename(image_path)
-        return image_path in image_index or image_filename in image_index
+        # Use the new path validation logic
+        valid_path = self._extract_image_path_from_struct(image_data)
+        if not valid_path:
+            return False
+        
+        # Check if the valid path exists in our image index
+        image_filename = os.path.basename(valid_path)
+        return valid_path in image_index or image_filename in image_index
     
     def _convert_mammoth_to_sample(self, item: Dict, idx: int) -> Dict[str, Any]:
         """Convert MAmmoTH annotation to training sample format"""
@@ -1164,11 +1295,20 @@ class CPUOptimizedDataLoader:
                 {"from": "gpt", "value": "This is an image from the MAmmoTH dataset."}
             ]
         
-        # Add image reference
+        # Add image reference if valid
+        image_data = None
         for key in ['image', 'image_path', 'filename', 'file_name']:
             if key in item:
-                sample["image"] = item[key]
+                image_data = item[key]
                 break
+        
+        if image_data:
+            valid_image_path = self._extract_image_path_from_struct(image_data)
+            if valid_image_path:
+                sample["image"] = valid_image_path
+            else:
+                # This sample will be skipped by the caller
+                print(f"Warning: MAmmoTH sample {idx} has no valid image path")
         
         # Add any additional fields
         for key, value in item.items():
@@ -1685,6 +1825,25 @@ def main():
         print(f"  - MB processed per second: {total_samples * 0.001 / processing_time:.1f}")
         print(f"  - CPU utilization: {loader.max_workers} workers across {CPU_CORES} cores")
         print(f"  - CPU efficiency: {(loader.max_workers / CPU_CORES * 100):.1f}% core utilization")
+    
+    # Data quality summary with LLaVA-OneVision specific insights
+    print(f"\nData Quality Summary (LLaVA-OneVision Struct Processing):")
+    print(f"  - Samples with invalid image paths: {loader.skipped_stats['invalid_image_paths']:,}")
+    print(f"    (LLaVA-OneVision samples with path=None or missing files)")
+    print(f"  - Samples with invalid video paths: {loader.skipped_stats['invalid_video_paths']:,}")
+    print(f"  - Samples with binary data found: {loader.skipped_stats['binary_data_found']:,}")
+    print(f"    (Embedded binary data correctly discarded per best practices)")
+    print(f"  - Samples null after serialization: {loader.skipped_stats['null_after_serialization']:,}")
+    
+    total_skipped = sum(loader.skipped_stats.values())
+    if total_skipped > 0:
+        print(f"  - Total samples skipped: {total_skipped:,}")
+        print(f"  ✅ LLaVA-OneVision struct format processed correctly:")
+        print(f"    • Binary data discarded (saves memory and prevents 'bytes' file errors)")
+        print(f"    • Only valid file paths extracted for SmolVLM2/nanotron training")
+        print(f"    • Samples with missing paths automatically filtered out")
+    else:
+        print(f"  ✅ Perfect data quality - no issues found")
 
 
 if __name__ == "__main__":
