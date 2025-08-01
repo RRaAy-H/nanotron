@@ -594,7 +594,7 @@ python scripts/prepare_training_data.py --output_dir data/datasets --base_path /
 
 # Use in training
 python scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --data_mixture scripts/mixtures/smolvlm2_256m_mixture.yaml \
     --output_dir checkpoints/smolvlm2_infini \
     --per_device_train_batch_size 4 \
@@ -678,7 +678,7 @@ def convert_smolvlm2_to_nanotron(input_file: str, output_file: str):
     
     # Load processor
     processor = AutoProcessor.from_pretrained(
-        "HuggingFaceTB/SmolVLM2-256M-Instruct",
+        "HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
         trust_remote_code=True
     )
     
@@ -795,7 +795,7 @@ parallelism:
   tp: 1
 
 tokenizer:
-  tokenizer_name_or_path: "HuggingFaceTB/SmolVLM2-256M-Instruct"
+  tokenizer_name_or_path: "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"
 
 tokens:
   batch_accumulation_per_replica: 8
@@ -915,7 +915,7 @@ if __name__ == "__main__":
 ```bash
 # Basic training
 python scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --data_mixture scripts/mixtures/smolvlm2_256m_mixture.yaml \
     --output_dir checkpoints/smolvlm2_infini \
     --per_device_train_batch_size 2 \
@@ -929,7 +929,7 @@ python scripts/train_smolvlm2_infini.py \
 
 # Multi-GPU training
 torchrun --nproc_per_node=2 scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --data_mixture scripts/mixtures/smolvlm2_256m_mixture.yaml \
     --output_dir checkpoints/smolvlm2_infini \
     --per_device_train_batch_size 2 \

@@ -291,7 +291,7 @@ Once validation passes, you can proceed with training:
 ```bash
 # Training with validated data pipeline
 python scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --data_mixture data/smolvlm2_256m_mixture.yaml \
     --output_dir checkpoints/smolvlm2_infini \
     --per_device_train_batch_size 2 \

@@ -61,6 +61,8 @@ class CPUOptimizedDataLoader:
         self.cache_dir.mkdir(exist_ok=True)
         # Use all available CPU cores for maximum performance
         self.max_workers = max_workers or CPU_CORES
+        # Track used sample IDs to avoid duplicates across datasets
+        self.used_sample_ids = set()
         print(f"CPU-optimized processing with {self.max_workers} workers")
     
     def _get_cache_key(self, path: str, num_samples: int) -> str:
@@ -87,6 +89,32 @@ class CPUOptimizedDataLoader:
                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
         except Exception as e:
             print(f"Warning: Could not cache data: {e}")
+    
+    def _deduplicate_samples(self, samples: List[Dict[str, Any]], dataset_name: str) -> List[Dict[str, Any]]:
+        """Remove duplicate samples based on ID and content hash"""
+        original_count = len(samples)
+        deduplicated = []
+        
+        for sample in samples:
+            # Generate a unique identifier for the sample
+            sample_id = sample.get('id', '')
+            
+            # If no ID, create hash from conversation content
+            if not sample_id and 'conversations' in sample:
+                content = json.dumps(sample['conversations'], sort_keys=True)
+                sample_id = f"{dataset_name}_{hashlib.md5(content.encode()).hexdigest()[:12]}"
+                sample['id'] = sample_id
+            
+            # Check if we've seen this sample before
+            if sample_id not in self.used_sample_ids:
+                self.used_sample_ids.add(sample_id)
+                deduplicated.append(sample)
+        
+        duplicates_removed = original_count - len(deduplicated)
+        if duplicates_removed > 0:
+            print(f"Removed {duplicates_removed} duplicate samples from {dataset_name}")
+        
+        return deduplicated
 
     def load_parquet_data(self, parquet_path: str, num_samples: int) -> List[Dict[str, Any]]:
         """CPU-optimized parquet loading with maximum parallelization"""
@@ -358,11 +386,9 @@ class CPUOptimizedDataLoader:
                 # Try to decode as UTF-8 first
                 return obj.decode('utf-8')
             except UnicodeDecodeError:
-                # If it's binary data (like images), convert to base64
-                return {
-                    "data": base64.b64encode(obj).decode('ascii'),
-                    "encoding": "base64"
-                }
+                # For binary data like images, convert to string representation
+                # This avoids creating nested dict structures that can break downstream processing
+                return f"<binary_data_{len(obj)}_bytes>"
         elif isinstance(obj, (np.integer, np.floating)):
             return obj.item()
         elif isinstance(obj, np.ndarray):
@@ -400,11 +426,17 @@ class CPUOptimizedDataLoader:
             
             for idx, sample in enumerate(batch_dict):
                 # Fast conversation format check
-                if "conversations" not in sample:
+                if "conversations" not in sample or sample.get("conversations") is None:
                     if "question" in sample and "answer" in sample:
                         sample["conversations"] = [
                             {"from": "human", "value": str(sample["question"])},
                             {"from": "gpt", "value": str(sample["answer"])}
+                        ]
+                    else:
+                        # Ensure conversations always exists and is not None
+                        sample["conversations"] = [
+                            {"from": "human", "value": "Please describe this content."},
+                            {"from": "gpt", "value": "This is content from a training dataset."}
                         ]
                 
                 # Fast ID generation
@@ -412,9 +444,16 @@ class CPUOptimizedDataLoader:
                     sample["id"] = f"{file_stem}_{i + idx}"
                 
                 # Ensure all objects are JSON serializable using recursive conversion
-                sample = self._make_json_serializable(sample)
-                
-                samples.append(sample)
+                try:
+                    sample = self._make_json_serializable(sample)
+                    # Verify the sample has required fields after serialization
+                    if sample and isinstance(sample, dict) and "conversations" in sample and "id" in sample:
+                        samples.append(sample)
+                    else:
+                        print(f"Warning: Skipping malformed sample at index {i + idx}")
+                except Exception as e:
+                    print(f"Warning: Failed to serialize sample at index {i + idx}: {e}")
+                    continue
         
         return samples
 
@@ -450,7 +489,7 @@ class CPUOptimizedDataLoader:
                     {"from": "human", "value": "Describe this video."},
                     {"from": "gpt", "value": f"This is a video from {dataset_name}."}
                 ],
-                "video": str(video_file.relative_to(video_path)),
+                "video": str(video_file),
                 "id": f"{dataset_name}_{idx}"
             })
         
@@ -1156,12 +1195,16 @@ class CPUOptimizedDataLoader:
         elif alternative_source["format"] == "parquet":
             samples = self.load_parquet_data(alternative_source["path"], num_samples)
         elif alternative_source["format"] == "video":
-            samples = self.load_video_data(alternative_source["path"], num_samples, alternative_source["name"])
+            # Handle video filter if provided
+            video_filter = alternative_source.get("video_filter", "*")
+            samples = self.load_video_data(alternative_source["path"], num_samples, alternative_source["name"], video_filter)
+        elif alternative_source["format"] == "json":
+            samples = self.load_json_data(alternative_source["path"], num_samples)
         else:
             print(f"Unsupported alternative format: {alternative_source['format']}")
             return []
         
-        print(f"Loaded {len(samples)} samples using alternative sampling")
+        print(f"Loaded {len(samples)} samples using alternative sampling from {alternative_source.get('name', 'source')}")
         return samples
 
     def process_datasets_parallel(self, datasets_config: List[Dict], output_dir: str) -> Dict[str, int]:
@@ -1251,6 +1294,9 @@ class CPUOptimizedDataLoader:
                 samples = self.load_alternative_sampling_data(config["alternative_source"], config["samples"])
             
             if samples:
+                # Apply deduplication to avoid duplicate samples across datasets
+                samples = self._deduplicate_samples(samples, config["name"])
+                
                 # Ensure output directory exists
                 os.makedirs(os.path.dirname(config["output"]), exist_ok=True)
                 
@@ -1501,8 +1547,8 @@ def main():
             "samples": 22000,
             "output": f"{args.output_dir}/vista_400k_combined.json",
             "modality": "video",
-            "path": f"{args.base_path}/VISTA-400K/two_needle_niah_qa/two_needle_niah_qa_14.tar",
-            "format": "tar"
+            "path": f"{args.base_path}/VISTA-400K/two_needle_niah_qa/two_needle_niah_qa.json",
+            "format": "json"
         },
         {
             "name": "sharegpt4video_all",
@@ -1512,8 +1558,8 @@ def main():
             "format": "alternative_sampling",
             "alternative_source": {
                 "name": "vista_400k_combined",
-                "path": f"{args.base_path}/VISTA-400K/two_needle_niah_qa/two_needle_niah_qa_14.tar",
-                "format": "tar"
+                "path": f"{args.base_path}/VISTA-400K/two_needle_niah_qa/two_needle_niah_qa.json",
+                "format": "json"
             }
         },
         # Additional video datasets to reach 33.0% distribution
@@ -1522,9 +1568,13 @@ def main():
             "samples": 44000,
             "output": f"{args.output_dir}/llava_video_hound.json",
             "modality": "video",
-            "path": f"{args.base_path}/llava-video",
-            "format": "video",
-            "video_filter": "hound_*"
+            "format": "alternative_sampling",
+            "alternative_source": {
+                "name": "llava_video_combined",
+                "path": f"{args.base_path}/llava-video",
+                "format": "video",
+                "video_filter": "*"  # Sample from all available llava-video datasets
+            }
         },
         {
             "name": "other_video_combined",
@@ -1558,8 +1608,8 @@ def main():
             "format": "alternative_sampling",
             "alternative_source": {
                 "name": "vista_400k_combined",
-                "path": f"{args.base_path}/VISTA-400K/two_needle_niah_qa/two_needle_niah_qa_14.tar",
-                "format": "tar"
+                "path": f"{args.base_path}/VISTA-400K/two_needle_niah_qa/two_needle_niah_qa.json",
+                "format": "json"
             }
         },
     ]
