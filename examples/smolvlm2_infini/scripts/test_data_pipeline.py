@@ -20,6 +20,7 @@ import yaml
 import argparse
 import logging
 import random
+import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from collections import defaultdict
@@ -86,7 +87,14 @@ class DataPipelineValidator:
             'total_samples': 0,
             'modality_counts': defaultdict(int),
             'errors': [],
-            'warnings': []
+            'warnings': [],
+            'data_quality': {
+                'null_conversations': [],
+                'missing_media_files': [],
+                'invalid_conversation_format': [],
+                'samples_validated': 0,
+                'samples_skipped': 0
+            }
         }
         
     def run_all_tests(self):
@@ -147,20 +155,44 @@ class DataPipelineValidator:
                 # Validate sample structure
                 valid_samples = 0
                 sample_errors = []
+                null_conversation_count = 0
+                invalid_format_count = 0
                 
-                for idx, sample in enumerate(data[:self.num_samples_to_test]):
+                samples_to_test = data if self.num_samples_to_test is None else data[:self.num_samples_to_test]
+                for idx, sample in enumerate(samples_to_test):
                     try:
                         self._validate_sample_structure(sample, dataset_name)
                         valid_samples += 1
+                        self.stats['data_quality']['samples_validated'] += 1
                     except Exception as e:
-                        sample_errors.append(f"Sample {idx}: {str(e)}")
+                        error_msg = str(e)
+                        sample_errors.append(f"Sample {idx}: {error_msg}")
+                        self.stats['data_quality']['samples_skipped'] += 1
+                        
+                        # Categorize error types
+                        if "conversations' field is null/missing" in error_msg:
+                            null_conversation_count += 1
+                            self.stats['data_quality']['null_conversations'].append(
+                                f"{dataset_name}[{idx}]: {sample.get('id', 'unknown')}"
+                            )
+                        elif "must be a list" in error_msg or "missing 'from' field" in error_msg:
+                            invalid_format_count += 1
+                            self.stats['data_quality']['invalid_conversation_format'].append(
+                                f"{dataset_name}[{idx}]: {error_msg}"
+                            )
                 
                 if sample_errors:
                     self.validation_results[dataset_name]['sample_errors'] = sample_errors
-                    self.stats['warnings'].append(f"{dataset_name}: {len(sample_errors)} sample errors")
+                    self.validation_results[dataset_name]['null_conversations'] = null_conversation_count
+                    self.validation_results[dataset_name]['invalid_format'] = invalid_format_count
+                    self.stats['warnings'].append(
+                        f"{dataset_name}: {len(sample_errors)} errors "
+                        f"({null_conversation_count} null conversations, {invalid_format_count} invalid format)"
+                    )
                     logger.warning(f"⚠️  {dataset_name}: Found {len(sample_errors)} problematic samples")
                 else:
-                    logger.info(f"✅ {dataset_name}: All {self.num_samples_to_test} tested samples valid")
+                    tested_count = len(samples_to_test)
+                    logger.info(f"✅ {dataset_name}: All {tested_count} tested samples valid")
                 
                 self.validation_results[dataset_name]['num_samples'] = num_samples
                 self.validation_results[dataset_name]['valid'] = len(sample_errors) == 0
@@ -174,25 +206,39 @@ class DataPipelineValidator:
     
     def _validate_sample_structure(self, sample: Dict[str, Any], dataset_name: str):
         """Validate individual sample structure"""
-        # Required fields
-        if 'conversations' not in sample:
-            raise ValueError("Missing 'conversations' field")
+        # Use .get() with defaults for safe access
+        conversations = sample.get('conversations', None)
+        sample_id = sample.get('id', 'unknown_id')
         
-        if 'id' not in sample:
-            raise ValueError("Missing 'id' field")
+        # Check if conversations is None or not present
+        if conversations is None:
+            raise ValueError(f"Sample {sample_id}: 'conversations' field is null/missing")
         
-        # Validate conversations
-        conversations = sample['conversations']
-        if not isinstance(conversations, list) or len(conversations) < 2:
-            raise ValueError("Conversations must be a list with at least 2 turns")
+        # Validate conversations is a list
+        if not isinstance(conversations, list):
+            raise ValueError(f"Sample {sample_id}: 'conversations' must be a list, got {type(conversations).__name__}")
+        
+        if len(conversations) < 2:
+            raise ValueError(f"Sample {sample_id}: conversations must have at least 2 turns, found {len(conversations)}")
         
         # Check conversation format
-        for turn in conversations:
-            if 'from' not in turn or 'value' not in turn:
-                raise ValueError("Each conversation turn must have 'from' and 'value' fields")
+        for i, turn in enumerate(conversations):
+            if turn is None:
+                raise ValueError(f"Sample {sample_id}: conversation turn {i} is null")
             
-            if turn['from'] not in ['human', 'gpt', 'system', 'assistant']:
-                raise ValueError(f"Invalid speaker: {turn['from']}")
+            if not isinstance(turn, dict):
+                raise ValueError(f"Sample {sample_id}: turn {i} must be a dict, got {type(turn).__name__}")
+            
+            speaker = turn.get('from', None)
+            value = turn.get('value', None)
+            
+            if speaker is None:
+                raise ValueError(f"Sample {sample_id}: turn {i} missing 'from' field")
+            if value is None:
+                raise ValueError(f"Sample {sample_id}: turn {i} missing 'value' field")
+            
+            if speaker not in ['human', 'gpt', 'system', 'assistant']:
+                raise ValueError(f"Sample {sample_id}: Invalid speaker '{speaker}' in turn {i}")
         
         # Determine and validate modality
         has_image = 'image' in sample
@@ -298,7 +344,7 @@ class DataPipelineValidator:
             # Create data arguments
             data_args = DataArguments(
                 data_mixture=str(self.mixture_path),
-                data_folder="",  # Adjust based on your setup
+                data_folder="/data1/yihao",  # Set to server data path
                 mask_user_tokens=False,
                 mask_system_tokens=True,
                 add_media_intro_outro=False,
@@ -346,9 +392,16 @@ class DataPipelineValidator:
                         else:
                             logger.warning(f"⚠️  Dataset {dataset_config['name']} is empty")
                             
+                    except FileNotFoundError as e:
+                        logger.error(f"❌ Media file missing for {dataset_config['name']}: {str(e)}")
+                        self.stats['data_quality']['missing_media_files'].append(
+                            f"{dataset_config['name']}: {str(e)}"
+                        )
+                        self.stats['errors'].append(f"Media file missing for {dataset_config['name']}: {str(e)}")
                     except Exception as e:
-                        logger.error(f"❌ Failed to load {dataset_config['name']}: {str(e)}")
-                        self.stats['errors'].append(f"Dataset loading error for {dataset_config['name']}: {str(e)}")
+                        error_type = type(e).__name__
+                        logger.error(f"❌ Failed to load {dataset_config['name']}: {error_type}: {str(e)}")
+                        self.stats['errors'].append(f"Dataset loading error for {dataset_config['name']}: {error_type}: {str(e)}")
             
             logger.info(f"\nDataset loading test complete: {samples_tested} samples tested")
             
@@ -604,10 +657,18 @@ class DataPipelineValidator:
         logger.info(f"  Total samples: {self.stats['total_samples']:,}")
         
         # Modality distribution
-        logger.info(f"\n📈 MODALITY DISTRIBUTION:")
+        logger.info(f"\n📈 MODALITY DISTRIBUTION (from {self.stats['data_quality']['samples_validated']} validated samples):")
         for modality, count in self.stats['modality_counts'].items():
-            percentage = (count / self.stats['total_samples'] * 100) if self.stats['total_samples'] > 0 else 0
+            percentage = (count / self.stats['data_quality']['samples_validated'] * 100) if self.stats['data_quality']['samples_validated'] > 0 else 0
             logger.info(f"  {modality}: {count:,} samples ({percentage:.1f}%)")
+        
+        # Data quality metrics
+        logger.info(f"\n📊 DATA QUALITY METRICS:")
+        logger.info(f"  Samples validated: {self.stats['data_quality']['samples_validated']:,}")
+        logger.info(f"  Samples skipped: {self.stats['data_quality']['samples_skipped']:,}")
+        logger.info(f"  Null conversations: {len(self.stats['data_quality']['null_conversations']):,}")
+        logger.info(f"  Invalid conversation format: {len(self.stats['data_quality']['invalid_conversation_format']):,}")
+        logger.info(f"  Missing media files: {len(self.stats['data_quality']['missing_media_files']):,}")
         
         # Errors summary
         if self.stats['errors']:
@@ -644,11 +705,20 @@ class DataPipelineValidator:
         
         # Save detailed report
         report_path = Path("data_pipeline_validation_report.json")
+        
+        # Convert defaultdict to regular dict for JSON serialization
+        stats_dict = dict(self.stats)
+        stats_dict['modality_counts'] = dict(self.stats['modality_counts'])
+        
+        report_data = {
+            'stats': stats_dict,
+            'validation_results': dict(self.validation_results),
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'num_samples_tested': self.num_samples_to_test if self.num_samples_to_test else 'all'
+        }
+        
         with open(report_path, 'w') as f:
-            json.dump({
-                'stats': dict(self.stats),
-                'validation_results': dict(self.validation_results)
-            }, f, indent=2)
+            json.dump(report_data, f, indent=2)
         logger.info(f"\n💾 Detailed report saved to: {report_path}")
 
 
@@ -675,6 +745,11 @@ def main():
         action="store_true",
         help="Enable verbose logging"
     )
+    parser.add_argument(
+        "--full-validation",
+        action="store_true",
+        help="Validate all samples in each dataset (warning: very slow)"
+    )
     
     args = parser.parse_args()
     
@@ -682,10 +757,14 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
     
     # Run validation
+    num_samples = None if args.full_validation else args.num_samples
+    if args.full_validation:
+        logger.warning("Full validation mode enabled - this will check ALL samples and may take a long time!")
+    
     validator = DataPipelineValidator(
         data_dir=args.data_dir,
         mixture_path=args.mixture_path,
-        num_samples_to_test=args.num_samples
+        num_samples_to_test=num_samples
     )
     
     try:

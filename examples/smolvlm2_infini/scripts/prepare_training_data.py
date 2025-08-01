@@ -1016,9 +1016,6 @@ class CPUOptimizedDataLoader:
                                 samples.append(sample)
                             items_processed += 1
                             
-                            # Progress reporting
-                            if items_processed % 10000 == 0:
-                                print(f"Processed {items_processed:,} items, found {len(samples)} matching samples")
             else:
                 # Fallback: chunked reading approach
                 samples = self._chunked_parse_mammoth_json(json_path, image_index, num_samples)
@@ -1078,9 +1075,6 @@ class CPUOptimizedDataLoader:
                                     sample = self._convert_mammoth_to_sample(item, items_processed)
                                     samples.append(sample)
                                 items_processed += 1
-                                
-                                if items_processed % 10000 == 0:
-                                    print(f"Processed {items_processed:,} items, found {len(samples)} matching samples")
                                     
                                 if len(samples) >= num_samples:
                                     break
