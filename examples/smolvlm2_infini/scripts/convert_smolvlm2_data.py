@@ -15,7 +15,7 @@ def convert_smolvlm2_to_nanotron(input_file: str, output_file: str, processor=No
     # Load processor if not provided
     if processor is None:
         processor = AutoProcessor.from_pretrained(
-            "HuggingFaceTB/SmolVLM2-256M-Instruct",
+            "HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
             trust_remote_code=True
         )
     
@@ -61,7 +61,7 @@ def convert_all_datasets(input_dir: str, output_dir: str):
     
     # Load processor once for efficiency
     processor = AutoProcessor.from_pretrained(
-        "HuggingFaceTB/SmolVLM2-256M-Instruct",
+        "HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
         trust_remote_code=True
     )
     

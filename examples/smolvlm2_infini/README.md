@@ -17,8 +17,11 @@ pip install pillow>=10.0.0 opencv-python-headless>=4.8.0
 # Navigate to this directory
 cd examples/smolvlm2_infini
 
-# Download datasets (800K samples)
-python scripts/download_datasets.py --output_dir data/datasets
+# Prepare datasets from local storage (according to new multimodal distribution)
+python scripts/prepare_training_data.py --output_dir data/datasets --base_path /data1/yihao
+
+# Validate data pipeline (recommended before training)
+./scripts/validate_pipeline.sh
 
 # Convert to Nanotron format
 python scripts/convert_smolvlm2_data.py
@@ -28,7 +31,7 @@ python scripts/convert_smolvlm2_data.py
 ```bash
 # Single GPU training
 python scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --data_mixture data/smolvlm2_256m_mixture.yaml \
     --output_dir checkpoints/smolvlm2_infini \
     --per_device_train_batch_size 2 \
@@ -39,7 +42,7 @@ python scripts/train_smolvlm2_infini.py \
 
 # Multi-GPU training
 torchrun --nproc_per_node=2 scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --data_mixture data/smolvlv2_256m_mixture.yaml \
     --output_dir checkpoints/smolvlm2_infini \
     --per_device_train_batch_size 2 \
@@ -61,11 +64,41 @@ python scripts/evaluate_smolvlm2.py \
     --test_long_context
 ```
 
+## Data Pipeline Validation
+
+Before training, validate your data pipeline to ensure everything is properly configured:
+
+### Quick Validation
+```bash
+# Run complete validation workflow
+./scripts/validate_pipeline.sh
+
+# Show dataset statistics  
+python scripts/debug_data_pipeline.py --data_dir data/datasets --stats
+
+# Validate mixture configuration
+python scripts/debug_data_pipeline.py --mixture data/smolvlm2_256m_mixture.yaml --validate_mixture
+```
+
+### Advanced Debugging
+```bash
+# Inspect specific dataset
+python scripts/debug_data_pipeline.py --dataset data/datasets/magpie_pro_l3_80b_mt.json --inspect
+
+# Debug specific sample
+python scripts/debug_data_pipeline.py --dataset data/datasets/llava_video_1_2m.json --sample_id 0
+
+# Comprehensive pipeline test
+python scripts/test_data_pipeline.py --data_dir data/datasets --mixture_path data/smolvlm2_256m_mixture.yaml
+```
+
+See [DATA_PIPELINE_TESTING.md](scripts/DATA_PIPELINE_TESTING.md) for detailed testing documentation.
+
 ## Features
 
 - **Infini-Attention Integration**: Process sequences up to 16K tokens with 512-token segments
 - **Multimodal Support**: Handles images, videos, and text inputs
-- **Optimized Dataset**: 800K samples carefully balanced for 256M parameter models
+- **Optimized Dataset**: Multimodal samples with specific sampling strategies (34.4% image, 33.0% video, 20.2% text, 12.3% multi-image)
 - **Extended Context**: Efficient long-context processing with memory compression
 - **Comprehensive Evaluation**: Tools for testing model performance
 
@@ -89,10 +122,14 @@ Key components:
 │   ├── smolvlm2_config.py          # Model configuration
 │   └── smolvlm2_training.yaml      # Training hyperparameters
 ├── scripts/
-│   ├── download_datasets.py        # Dataset downloader
+│   ├── prepare_training_data.py    # Dataset preparation from local storage
 │   ├── convert_smolvlm2_data.py    # Format converter
 │   ├── train_smolvlm2_infini.py    # Training script
-│   └── evaluate_smolvlm2.py        # Evaluation tools
+│   ├── evaluate_smolvlm2.py        # Evaluation tools
+│   ├── test_data_pipeline.py       # Comprehensive pipeline tests
+│   ├── debug_data_pipeline.py      # Data debugging tools
+│   ├── validate_pipeline.sh        # Complete validation workflow
+│   └── DATA_PIPELINE_TESTING.md    # Testing documentation
 ├── data/
 │   └── smolvlm2_256m_mixture.yaml  # Dataset mixture
 ├── SMOLVLM2_USAGE_GUIDE.md         # Detailed guide
@@ -116,10 +153,25 @@ The core model is implemented in:
 
 ## Dataset Composition
 
-Optimized 800K sample mixture:
-- **Image datasets (80%)**: LLaVA-Instruct-150K, ShareGPT4V, AI2D, ChartQA, VQAv2, etc.
-- **Video datasets (12.5%)**: LLaVA-Video, VideoInstruct-100K, OpenOrca
-- **Text datasets (7.5%)**: Alpaca, ShareGPT for instruction following
+Multimodal dataset mixture with specific data sampling strategies:
+
+| Modality | Percentage | Main Sources |
+|----------|------------|-------------|
+| Image | 34.4% | LLaVA-OneVision datasets (parquet format) |
+| Video | 33.0% | LLaVA-Video-178K, VISTA-400K, ShareGPT4Video |
+| Text | 20.2% | Magpie Pro datasets, MathQA (parquet format) |
+| Multi-image | 12.3% | M4-Instruct-Data, MammoTH-VL datasets |
+
+**Key Features:**
+- **Direct sampling**: Use original dataset as specified
+- **Alternative sampling**: Substitute with specified alternatives when original is unavailable
+- **Composite sampling**: Combine multiple sources with defined proportions  
+- **Deduplication**: All sampling strategies avoid duplicate samples across datasets
+
+**Data Locations:**
+- Text & Image: `/data1/yihao/LLaVA-OneVision-Data` (parquet format)
+- Multi-image: `/data1/yihao/M4-Instruct-Data` (ZIP), `/data1/yihao/MammoTH-VL_Instruct-12M` (TAR.GZ)
+- Video: Multiple locations including `/data1/yihao/LLaVA-OneVision-Data`, `/data1/yihao/VISTA-400K`, `/data1/yihao/ShareGPTVideo`
 
 ## Performance
 

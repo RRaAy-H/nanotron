@@ -70,7 +70,7 @@ parallelism:
   tp: 1
 
 tokenizer:
-  tokenizer_name_or_path: "HuggingFaceTB/SmolVLM2-256M-Instruct"
+  tokenizer_name_or_path: "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"
 
 tokens:
   batch_accumulation_per_replica: 8
