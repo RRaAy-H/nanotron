@@ -31,18 +31,30 @@ from PIL import Image
 from tqdm import tqdm
 
 # Add parent directories to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent))
-sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent / "src"))
+project_root = Path(__file__).parent.parent.parent.parent.parent
+sys.path.append(str(project_root))
+sys.path.append(str(project_root / "src"))
+# Add smolvlm package path
+smolvlm_path = project_root / "smollm" / "vision" / "smolvlm2"
+if smolvlm_path.exists():
+    sys.path.append(str(smolvlm_path))
+    print(f"✅ Added SmolVLM path: {smolvlm_path}")
+else:
+    print(f"⚠️  SmolVLM path not found: {smolvlm_path}")
 
 try:
-    from transformers import AutoProcessor
+    import transformers
+    from transformers import AutoProcessor, AutoModelForImageTextToText
     from smolvlm.datasets.builder import build_datasets, DataCollatorForSupervisedDataset
     from smolvlm.datasets.dataset import SupervisedDataset
     from smolvlm.train.args import DataArguments, TrainingArguments, ModelArguments
     from smolvlm.utils import mprint
+    print(f"✅ Using transformers version: {transformers.__version__}")
+    print("✅ Successfully imported all required modules")
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure you have the smolvlm package installed and in your PYTHONPATH")
+    print("Also ensure you have a recent transformers version")
     sys.exit(1)
 
 # Configure logging
@@ -304,7 +316,7 @@ class DataPipelineValidator:
             
             # Create model arguments
             model_args = ModelArguments(
-                model_name_or_path="HuggingFaceTB/SmolVLM2-256M-Instruct",
+                model_name_or_path="HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
                 fps=1.0,
                 frames_per_clip=1,
             )
@@ -347,55 +359,65 @@ class DataPipelineValidator:
     
     def _create_mock_processor(self):
         """Create a mock processor for testing"""
-        try:
-            # Try to load actual processor
-            processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-256M-Instruct")
-            logger.info("✅ Loaded actual SmolVLM2 processor")
-            return processor
-        except Exception as e:
-            logger.warning(f"⚠️  Could not load actual processor: {e}")
-            logger.warning("Creating mock processor for testing")
+        model_name = "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"
+        
+        # Try with and without trust_remote_code
+        for trust_remote_code in [True, False]:
+            try:
+                # Try to load actual processor
+                processor = AutoProcessor.from_pretrained(
+                    model_name, 
+                    trust_remote_code=trust_remote_code
+                )
+                logger.info(f"✅ Loaded actual SmolVLM2 processor from {model_name} (trust_remote_code={trust_remote_code})")
+                return processor
+            except Exception as e:
+                logger.debug(f"Failed to load processor from {model_name} with trust_remote_code={trust_remote_code}: {e}")
+                continue
+        
+        logger.warning("⚠️  Could not load actual processor from any configuration")
+        logger.warning("Creating mock processor for testing")
+        
+        # Create mock processor
+        class MockProcessor:
+            class MockTokenizer:
+                model_max_length = 2048
+                pad_token_id = 0
+                additional_special_tokens = []
+                
+                def encode(self, text, add_special_tokens=False):
+                    return [1, 2, 3, 4, 5]  # Mock token IDs
+                
+                def convert_tokens_to_ids(self, token):
+                    return 1
+                
+                def convert_ids_to_tokens(self, ids):
+                    return ['token'] * len(ids)
+                
+                def get_vocab(self):
+                    return {}
             
-            # Create mock processor
-            class MockProcessor:
-                class MockTokenizer:
-                    model_max_length = 2048
-                    pad_token_id = 0
-                    additional_special_tokens = []
-                    
-                    def encode(self, text, add_special_tokens=False):
-                        return [1, 2, 3, 4, 5]  # Mock token IDs
-                    
-                    def convert_tokens_to_ids(self, token):
-                        return 1
-                    
-                    def convert_ids_to_tokens(self, ids):
-                        return ['token'] * len(ids)
-                    
-                    def get_vocab(self):
-                        return {}
-                
-                class MockImageProcessor:
-                    size = {"longest_edge": 384}
-                    do_resize = True
-                    do_image_splitting = False
-                
-                def __init__(self):
-                    self.tokenizer = self.MockTokenizer()
-                    self.image_processor = self.MockImageProcessor()
-                
-                def apply_chat_template(self, conversation, add_generation_prompt=False):
-                    return "Mock conversation text"
-                
-                def __call__(self, text=None, images=None, return_tensors="pt", padding=False):
-                    # Return mock encoded data
-                    return {
-                        "input_ids": torch.tensor([[1, 2, 3, 4, 5]]),
-                        "attention_mask": torch.tensor([[1, 1, 1, 1, 1]]),
-                        "pixel_values": torch.randn(1, 3, 384, 384) if images else None
-                    }
+            class MockImageProcessor:
+                size = {"longest_edge": 384}
+                do_resize = True
+                do_image_splitting = False
             
-            return MockProcessor()
+            def __init__(self):
+                self.tokenizer = self.MockTokenizer()
+                self.image_processor = self.MockImageProcessor()
+            
+            def apply_chat_template(self, conversation, add_generation_prompt=False):
+                return "Mock conversation text"
+            
+            def __call__(self, text=None, images=None, return_tensors="pt", padding=False):
+                # Return mock encoded data
+                return {
+                    "input_ids": torch.tensor([[1, 2, 3, 4, 5]]),
+                    "attention_mask": torch.tensor([[1, 1, 1, 1, 1]]),
+                    "pixel_values": torch.randn(1, 3, 384, 384) if images else None
+                }
+        
+        return MockProcessor()
     
     def _validate_dataset_sample(self, sample: Dict[str, torch.Tensor], dataset_name: str):
         """Validate a sample loaded from dataset"""
