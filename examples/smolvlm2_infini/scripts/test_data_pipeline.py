@@ -44,7 +44,7 @@ else:
 
 try:
     import transformers
-    from transformers import AutoProcessor, AutoModelForImageTextToText
+    from transformers import AutoProcessor
     from smolvlm.datasets.builder import build_datasets, DataCollatorForSupervisedDataset
     from smolvlm.datasets.dataset import SupervisedDataset
     from smolvlm.train.args import DataArguments, TrainingArguments, ModelArguments
