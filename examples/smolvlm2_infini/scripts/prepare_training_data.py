@@ -1044,9 +1044,6 @@ class CPUOptimizedDataLoader:
                 if self._should_include_mammoth_item(item, image_index):
                     sample = self._convert_mammoth_to_sample(item, idx)
                     samples.append(sample)
-                
-                if idx % 10000 == 0:
-                    print(f"Processed {idx:,} items, found {len(samples)} matching samples")
         
         except Exception as e:
             print(f"Fallback parsing failed: {e}")

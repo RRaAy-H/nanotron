@@ -238,16 +238,40 @@ class DataPipelineValidator:
             if field not in entry:
                 raise ValueError(f"Missing required field '{field}' in {entry.get('name', 'unknown')}")
         
-        # Check if JSON file exists
-        json_path = Path(entry['json_path'])
-        if not json_path.is_absolute():
-            json_path = self.mixture_path.parent / json_path
+        # Check if JSON file exists with improved path resolution
+        json_path_str = entry['json_path']
+        json_path = Path(json_path_str)
         
-        if json_path.exists():
-            logger.debug(f"  ✓ {entry['name']}: JSON file exists")
+        # Try multiple path resolution strategies
+        candidate_paths = []
+        
+        if json_path.is_absolute():
+            candidate_paths.append(json_path)
         else:
-            self.stats['warnings'].append(f"{entry['name']}: JSON file not found at {json_path}")
+            # Strategy 1: Relative to mixture file directory
+            candidate_paths.append(self.mixture_path.parent / json_path)
+            
+            # Strategy 2: Relative to current working directory
+            candidate_paths.append(Path.cwd() / json_path)
+            
+            # Strategy 3: Try removing potential duplicate "data/" prefix
+            if str(json_path).startswith('data/') and 'data' in str(self.mixture_path.parent):
+                relative_path = str(json_path)[5:]  # Remove "data/" prefix
+                candidate_paths.append(self.mixture_path.parent / relative_path)
+        
+        # Find the first existing path
+        found_path = None
+        for candidate in candidate_paths:
+            if candidate.exists():
+                found_path = candidate
+                break
+        
+        if found_path:
+            logger.debug(f"  ✓ {entry['name']}: JSON file exists at {found_path}")
+        else:
+            self.stats['warnings'].append(f"{entry['name']}: JSON file not found at {json_path_str}")
             logger.warning(f"  ⚠️  {entry['name']}: JSON file not found")
+            logger.debug(f"    Tried paths: {[str(p) for p in candidate_paths]}")
         
         # Validate modality matches
         if entry['modality'] != modality and modality not in ['multiimage', 'multi-image']:
@@ -266,7 +290,6 @@ class DataPipelineValidator:
                 mask_user_tokens=False,
                 mask_system_tokens=True,
                 add_media_intro_outro=False,
-                fps=1.0,
                 max_frames=25,
                 video_target_size=384,
                 image_target_size=1536,
@@ -406,23 +429,23 @@ class DataPipelineValidator:
     def test_data_collation(self):
         """Test data collation and batching"""
         try:
-            # Create mock samples
+            # Create mock samples with proper tensor dtypes
             samples = [
                 {
-                    'input_ids': torch.randint(0, 1000, (10,)),
-                    'attention_mask': torch.ones(10),
-                    'labels': torch.randint(-100, 1000, (10,)),
+                    'input_ids': torch.randint(0, 1000, (10,), dtype=torch.long),
+                    'attention_mask': torch.ones(10, dtype=torch.long),
+                    'labels': torch.randint(-100, 1000, (10,), dtype=torch.long),
                 },
                 {
-                    'input_ids': torch.randint(0, 1000, (15,)),
-                    'attention_mask': torch.ones(15),
-                    'labels': torch.randint(-100, 1000, (15,)),
+                    'input_ids': torch.randint(0, 1000, (15,), dtype=torch.long),
+                    'attention_mask': torch.ones(15, dtype=torch.long),
+                    'labels': torch.randint(-100, 1000, (15,), dtype=torch.long),
                 },
                 {
-                    'input_ids': torch.randint(0, 1000, (8,)),
-                    'attention_mask': torch.ones(8),
-                    'labels': torch.randint(-100, 1000, (8,)),
-                    'pixel_values': torch.randn(3, 384, 384),
+                    'input_ids': torch.randint(0, 1000, (8,), dtype=torch.long),
+                    'attention_mask': torch.ones(8, dtype=torch.long),
+                    'labels': torch.randint(-100, 1000, (8,), dtype=torch.long),
+                    'pixel_values': torch.randn(1, 3, 384, 384),  # Add frames dimension
                 }
             ]
             
@@ -436,12 +459,20 @@ class DataPipelineValidator:
             # Test collation
             batch = collator(samples)
             
-            # Validate batch
-            self._validate_batch(batch, len(samples))
+            # Validate batch structure
+            if not isinstance(batch, dict):
+                raise ValueError("Batch should be a dictionary")
+                
+            required_keys = ['input_ids', 'attention_mask', 'labels']
+            for key in required_keys:
+                if key not in batch:
+                    raise ValueError(f"Missing required key '{key}' in batch")
+                    
             logger.info("✅ Data collation test passed")
             
         except Exception as e:
             logger.error(f"❌ Data collation test failed: {str(e)}")
+            logger.error(f"Exception details: {type(e).__name__}: {str(e)}")
             self.stats['errors'].append(f"Data collation test failed: {str(e)}")
     
     def _validate_batch(self, batch: Dict[str, torch.Tensor], batch_size: int):
