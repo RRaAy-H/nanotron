@@ -457,87 +457,122 @@ class CPUOptimizedDataLoader:
         
         return samples
 
-    def load_video_data(self, video_path: str, num_samples: int, dataset_name: str, video_filter: str = None) -> List[Dict[str, Any]]:
-        """CPU-optimized video data loading with maximum parallel directory scanning"""
-        print(f"Processing video dataset {dataset_name} from {video_path}...")
+
+    def load_llava_video_json_data(self, video_path: str, num_samples: int, dataset_name: str, video_filter: str = None) -> List[Dict[str, Any]]:
+        """Load LLaVA-Video dataset with multiple JSON annotation files per subfolder"""
+        print(f"Processing LLaVA-Video dataset {dataset_name} from {video_path}...")
         
         if not os.path.exists(video_path):
+            print(f"Video path does not exist: {video_path}")
             return []
         
-        if os.path.isfile(video_path):
-            return [{
-                "conversations": [
-                    {"from": "human", "value": "Describe this video."},
-                    {"from": "gpt", "value": f"This is a video from {dataset_name}."}
-                ],
-                "video": video_path,
-                "id": f"{dataset_name}_0"
-            }]
-        
-        # Parallel directory scanning with maximum CPU utilization
-        video_files = self._find_video_files_parallel(video_path, video_filter)
-        
-        # CPU random sampling
-        if len(video_files) > num_samples:
-            video_files = random.sample(video_files, num_samples)
-        
-        # Generate samples efficiently
-        samples = []
-        for idx, video_file in enumerate(video_files[:num_samples]):
-            samples.append({
-                "conversations": [
-                    {"from": "human", "value": "Describe this video."},
-                    {"from": "gpt", "value": f"This is a video from {dataset_name}."}
-                ],
-                "video": str(video_file),
-                "id": f"{dataset_name}_{idx}"
-            })
-        
-        print(f"Processed {len(samples)} video samples")
-        return samples
-    
-    def _find_video_files_parallel(self, video_path: str, video_filter: str = None) -> List[Path]:
-        """Maximum parallel video file discovery using all CPU cores"""
+        # Find subfolders matching the video filter
         path = Path(video_path)
-        
-        # Determine search directories
         if video_filter:
-            search_dirs = [d for d in path.glob(video_filter) if d.is_dir()]
-            print(f"Video filter '{video_filter}' found {len(search_dirs)} directories")
-            if len(search_dirs) == 0:
+            subfolders = [d for d in path.glob(video_filter) if d.is_dir()]
+            print(f"Video filter '{video_filter}' found {len(subfolders)} directories")
+            if len(subfolders) == 0:
                 print(f"Available directories in {video_path}:")
                 for d in path.iterdir():
                     if d.is_dir():
                         print(f"  - {d.name}")
         else:
-            search_dirs = [path]
+            subfolders = [d for d in path.iterdir() if d.is_dir()]
         
-        if not search_dirs:
+        if not subfolders:
+            print(f"No subfolders found in {video_path}")
             return []
         
-        # Parallel file discovery with maximum CPU utilization
-        def find_videos_in_dir(search_dir):
-            video_files = []
-            extensions = ['.mp4', '.avi', '.mov', '.mkv']
-            
-            # Use maximum parallel glob operations
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(extensions))) as executor:
-                futures = [executor.submit(lambda ext: list(search_dir.rglob(f'*{ext}')), ext) 
-                          for ext in extensions]
-                for future in concurrent.futures.as_completed(futures):
-                    video_files.extend(future.result())
-            
-            return video_files
+        # Process all subfolders in parallel
+        all_samples = []
+        samples_per_subfolder = max(1, num_samples // len(subfolders))
         
-        # Parallel processing of search directories with maximum workers
-        if len(search_dirs) > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(search_dirs))) as executor:
-                results = list(executor.map(find_videos_in_dir, search_dirs))
-                video_files = [f for result in results for f in result]
-        else:
-            video_files = find_videos_in_dir(search_dirs[0])
+        def process_subfolder(subfolder):
+            subfolder_samples = []
+            subfolder_path = Path(subfolder)
+            
+            # Find all *_processed.json files in this subfolder
+            json_files = list(subfolder_path.glob("*_processed.json"))
+            if not json_files:
+                print(f"No *_processed.json files found in {subfolder_path.name}")
+                return []
+            
+            print(f"Found {len(json_files)} JSON files in {subfolder_path.name}")
+            
+            # Load and combine all JSON files from this subfolder
+            for json_file in json_files:
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    if isinstance(data, list):
+                        for sample in data:
+                            if self._validate_llava_video_sample(sample, subfolder_path):
+                                # Resolve video path relative to subfolder
+                                video_rel_path = sample.get('video', '')
+                                full_video_path = subfolder_path / video_rel_path
+                                
+                                # Check if video file exists
+                                if full_video_path.exists():
+                                    # Update sample with absolute video path
+                                    processed_sample = sample.copy()
+                                    processed_sample['video'] = str(full_video_path)
+                                    processed_sample['dataset_name'] = dataset_name
+                                    processed_sample['subfolder'] = subfolder_path.name
+                                    subfolder_samples.append(processed_sample)
+                                else:
+                                    print(f"Video file not found: {full_video_path}")
+                    
+                except Exception as e:
+                    print(f"Error loading JSON file {json_file}: {e}")
+                    continue
+            
+            # Sample from this subfolder if we have too many samples
+            if len(subfolder_samples) > samples_per_subfolder:
+                subfolder_samples = random.sample(subfolder_samples, samples_per_subfolder)
+            
+            print(f"Loaded {len(subfolder_samples)} valid samples from {subfolder_path.name}")
+            return subfolder_samples
         
-        return video_files
+        # Process subfolders in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(subfolders))) as executor:
+            results = list(executor.map(process_subfolder, subfolders))
+            for result in results:
+                all_samples.extend(result)
+        
+        # Final sampling if we have too many samples
+        if len(all_samples) > num_samples:
+            all_samples = random.sample(all_samples, num_samples)
+        
+        print(f"Processed {len(all_samples)} total samples from LLaVA-Video dataset")
+        return all_samples
+    
+    def _validate_llava_video_sample(self, sample: Dict, subfolder_path: Path) -> bool:
+        """Validate that a LLaVA-Video sample has required fields"""
+        required_fields = ['id', 'conversations', 'video']
+        
+        if not isinstance(sample, dict):
+            return False
+        
+        for field in required_fields:
+            if field not in sample:
+                return False
+        
+        # Validate conversations structure
+        conversations = sample.get('conversations', [])
+        if not isinstance(conversations, list) or len(conversations) == 0:
+            return False
+        
+        # Check that conversations have proper structure
+        for conv in conversations:
+            if not isinstance(conv, dict):
+                return False
+            if 'from' not in conv or 'value' not in conv:
+                return False
+            if conv['from'] not in ['human', 'gpt']:
+                return False
+        
+        return True
 
     def load_json_data(self, json_path: str, num_samples: int) -> List[Dict[str, Any]]:
         """Load data from a JSON file"""
@@ -1194,10 +1229,10 @@ class CPUOptimizedDataLoader:
             samples = self.load_tar_data(alternative_source["path"], num_samples)
         elif alternative_source["format"] == "parquet":
             samples = self.load_parquet_data(alternative_source["path"], num_samples)
-        elif alternative_source["format"] == "video":
+        elif alternative_source["format"] == "llava_video_json":
             # Handle video filter if provided
             video_filter = alternative_source.get("video_filter", "*")
-            samples = self.load_video_data(alternative_source["path"], num_samples, alternative_source["name"], video_filter)
+            samples = self.load_llava_video_json_data(alternative_source["path"], num_samples, alternative_source["name"], video_filter)
         elif alternative_source["format"] == "json":
             samples = self.load_json_data(alternative_source["path"], num_samples)
         else:
@@ -1258,7 +1293,7 @@ class CPUOptimizedDataLoader:
             samples = []
             
             # Add format validation
-            supported_formats = ["parquet", "video", "zip", "tar.gz", "tar", "tar_directory", "json", "zip_directory", "composite", "alternative_sampling", "mammoth_tar"]
+            supported_formats = ["parquet", "llava_video_json", "zip", "tar.gz", "tar", "tar_directory", "json", "zip_directory", "composite", "alternative_sampling", "mammoth_tar"]
             if config["format"] not in supported_formats:
                 print(f"Unsupported format '{config['format']}' for dataset {config['name']}")
                 return 0
@@ -1271,9 +1306,9 @@ class CPUOptimizedDataLoader:
             
             if config["format"] == "parquet":
                 samples = self.load_parquet_data(config["path"], config["samples"])
-            elif config["format"] == "video":
+            elif config["format"] == "llava_video_json":
                 video_filter = config.get("video_filter")
-                samples = self.load_video_data(
+                samples = self.load_llava_video_json_data(
                     config["path"], config["samples"], config["name"], video_filter
                 )
             elif config["format"] == "json":
@@ -1521,7 +1556,7 @@ def main():
             "output": f"{args.output_dir}/llava_video_1_2m.json",
             "modality": "video",
             "path": f"{args.base_path}/llava-video",
-            "format": "video",
+            "format": "llava_video_json",
             "video_filter": "1_2_m_*"
         },
         {
@@ -1530,7 +1565,7 @@ def main():
             "output": f"{args.output_dir}/llava_video_2_3m.json",
             "modality": "video",
             "path": f"{args.base_path}/llava-video",
-            "format": "video",
+            "format": "llava_video_json",
             "video_filter": "2_3_m_*"
         },
         {
@@ -1539,7 +1574,7 @@ def main():
             "output": f"{args.output_dir}/llava_video_0_30s.json",
             "modality": "video",
             "path": f"{args.base_path}/llava-video",
-            "format": "video",
+            "format": "llava_video_json",
             "video_filter": "0_30_s_*"
         },
         {
@@ -1572,7 +1607,7 @@ def main():
             "alternative_source": {
                 "name": "llava_video_combined",
                 "path": f"{args.base_path}/llava-video",
-                "format": "video",
+                "format": "llava_video_json",
                 "video_filter": "*"  # Sample from all available llava-video datasets
             }
         },
@@ -1585,7 +1620,7 @@ def main():
             "alternative_source": {
                 "name": "llava_video_combined",
                 "path": f"{args.base_path}/llava-video",
-                "format": "video"
+                "format": "llava_video_json"
             }
         },
         {
@@ -1597,7 +1632,7 @@ def main():
             "alternative_source": {
                 "name": "llava_video_combined",
                 "path": f"{args.base_path}/llava-video",
-                "format": "video"
+                "format": "llava_video_json"
             }
         },
         {
