@@ -19,7 +19,7 @@ This guide provides step-by-step instructions for training SmolVLM2 with Nanotro
 - **GPU**: NVIDIA GPU with 8GB+ VRAM (A100/V100 recommended for faster training)
 - **RAM**: 32GB+ system memory
 - **Storage**: 100GB+ free disk space for datasets and checkpoints
-- **OS**: Linux (Ubuntu 20.04+) or macOS
+- **OS**: Linux (Ubuntu 20.04+), macOS, or Windows (with CUDA support)
 - **Python**: 3.8-3.12
 
 ### Software Requirements
@@ -94,6 +94,25 @@ This will download ~800K samples optimized for 256M parameter training:
 - Video datasets: 100K samples (12.5%)
 - Text datasets: 60K samples (7.5%)
 
+**For Quick Testing**: Use the sample data with the test mixture:
+```bash
+# Use small test dataset for validation
+python scripts/train_smolvlm2_infini.py \
+    --data_mixture data/smolvlm2_256m_mixture_test.yaml \
+    --max_steps 100 \
+    --output_dir checkpoints/smolvlm2_infini_test
+```
+
+**For 2-Hour Validation**: Train on 1,000 steps to verify trainability:
+```bash
+# Quick 2-hour validation training
+python scripts/train_smolvlm2_infini.py \
+    --train_data_path ./train_data.json \
+    --max_steps 1000 \
+    --num_train_epochs 0.2 \
+    --output_dir checkpoints/smolvlm2_infini_quick
+```
+
 **Note**: The download process may take several hours depending on your internet connection.
 
 ### Step 2: Convert to Nanotron Format
@@ -152,7 +171,51 @@ parallelism:
 
 ## Training
 
-### Step 1: Single GPU Training
+### Step 1: Quick Validation Training (2-Hour Completion)
+
+For rapid validation that the model is trainable within 2 hours:
+
+```bash
+# Quick validation training - completes in ~2 hours
+python scripts/train_smolvlm2_infini.py \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --train_data_path ./train_data.json \
+    --output_dir checkpoints/smolvlm2_infini_quick \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 4 \
+    --learning_rate 1e-5 \
+    --max_steps 1000 \
+    --num_train_epochs 0.2 \
+    --bf16 \
+    --gradient_checkpointing \
+    --logging_steps 10 \
+    --save_steps 100 \
+    --eval_steps 100 \
+    --do_train
+```
+
+### Step 2: Small Dataset Testing (Original)
+
+```bash
+# Test with small sample dataset first
+python scripts/train_smolvlm2_infini.py \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --data_mixture data/smolvlm2_256m_mixture_test.yaml \
+    --image_dir data/sample_data/0_30_s_nextqa_videos_1 \
+    --output_dir checkpoints/smolvlm2_infini_test \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 4 \
+    --learning_rate 1e-5 \
+    --max_steps 50 \
+    --bf16 \
+    --gradient_checkpointing \
+    --logging_steps 5 \
+    --save_steps 25 \
+    --eval_steps 25 \
+    --do_train
+```
+
+### Step 3: Full Dataset Training (Long-term)
 
 ```bash
 # Basic training command
@@ -168,10 +231,11 @@ python scripts/train_smolvlm2_infini.py \
     --gradient_checkpointing \
     --logging_steps 10 \
     --save_steps 1000 \
+    --do_train \
     --report_to wandb
 ```
 
-### Step 2: Multi-GPU Training
+### Step 4: Multi-GPU Training (Long-term)
 
 ```bash
 # For 2 GPUs
@@ -189,7 +253,7 @@ torchrun --nproc_per_node=2 scripts/train_smolvlm2_infini.py \
     --report_to wandb
 ```
 
-### Step 3: Resume Training
+### Step 5: Resume Training
 
 ```bash
 # Resume from checkpoint
@@ -325,6 +389,54 @@ rm -rf ~/.cache/huggingface/datasets/
 # Re-download specific dataset
 python scripts/download_datasets.py \
     --output_dir data/datasets
+```
+
+#### 4. Tensor Type Alignment Issues
+
+If you encounter "Input type (torch.cuda.FloatTensor) and weight type (CUDABFloat16Type)" errors:
+
+**Solution**: The training script automatically handles tensor type alignment. Ensure you're using the `--bf16` flag consistently:
+
+```bash
+# Correct usage with bf16
+python scripts/train_smolvlm2_infini.py \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --bf16 \
+    --do_train \
+    # ... other arguments
+```
+
+**What happens internally**:
+- Model weights are loaded in bfloat16 when `--bf16` is specified
+- Input tensors are automatically aligned to match model dtype
+- This prevents type mismatches during forward/backward passes
+
+#### 5. Training Doesn't Start
+
+If training loads the model but doesn't begin training steps:
+
+```bash
+# Add the --do_train flag
+python scripts/train_smolvlm2_infini.py \
+    --do_train \
+    # ... other arguments
+```
+
+#### 6. Video Processing Warnings
+
+You may see warnings like `[swscaler @ ...] Slice parameters 0, 375 are invalid`:
+
+**Cause**: Some videos in the dataset have non-standard dimensions or codec issues that cause FFmpeg scaling warnings.
+
+**Impact**: These are **warnings only** and do not affect training. The training script automatically handles problematic video frames by:
+- Using fallback placeholder images for corrupted frames
+- Resizing all frames to standard 224x224 dimensions
+- Continuing training without interruption
+
+**Solution**: No action needed - these warnings are expected and handled automatically. If you want to minimize them, you can:
+```bash
+# Pre-process videos to standard format (optional)
+ffmpeg -i input_video.mp4 -vf scale=224:224 -c:v libx264 output_video.mp4
 ```
 
 ## File Structure
