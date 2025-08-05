@@ -178,9 +178,12 @@ class VisionLanguageDataset(Dataset):
                     image = Image.new('RGB', (224, 224), color=(128, 128, 128))  # Gray placeholder
             else:
                 # Handle both file paths and embedded base64 image data
-                image_data = item['image']
+                image_data = item.get('image')
                 
-                if isinstance(image_data, dict) and "bytes" in image_data:
+                if image_data is None:
+                    # Handle text-only samples - no image needed
+                    image = None
+                elif isinstance(image_data, dict) and "bytes" in image_data:
                     # Handle embedded base64 image data
                     import base64
                     import io
@@ -218,15 +221,26 @@ class VisionLanguageDataset(Dataset):
             else:
                 text = item['text']
             
-            # Process inputs
-            inputs = self.processor(
-                images=image,
-                text=text,
-                return_tensors="pt",
-                max_length=self.max_length,
-                truncation=True,
-                padding="max_length"
-            )
+            # Process inputs - handle text-only vs multimodal
+            if image is None:
+                # Text-only processing - no image
+                inputs = self.processor(
+                    text=text,
+                    return_tensors="pt",
+                    max_length=self.max_length,
+                    truncation=True,
+                    padding="max_length"
+                )
+            else:
+                # Multimodal processing - with image
+                inputs = self.processor(
+                    images=image,
+                    text=text,
+                    return_tensors="pt",
+                    max_length=self.max_length,
+                    truncation=True,
+                    padding="max_length"
+                )
             
             # Remove batch dimension
             for key in inputs:
@@ -237,12 +251,10 @@ class VisionLanguageDataset(Dataset):
             
         except Exception as e:
             logger.warning(f"Error loading sample {idx}: {e}")
-            # Return a dummy sample in case of error
-            dummy_image = Image.new('RGB', (224, 224), color='white')
+            # Return a dummy text-only sample in case of error
             dummy_text = "Error loading sample"
             
             inputs = self.processor(
-                images=dummy_image,
                 text=dummy_text,
                 return_tensors="pt",
                 max_length=self.max_length,
