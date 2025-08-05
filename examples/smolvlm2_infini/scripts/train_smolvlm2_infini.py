@@ -339,7 +339,11 @@ class SmolVLM2InfiniTrainer:
         )
         
         # Create scheduler
-        num_training_steps = len(self.train_dataset) // self.args.per_device_train_batch_size * self.args.num_train_epochs
+        steps_per_epoch = len(self.train_dataset) // self.args.per_device_train_batch_size
+        if hasattr(self.args, 'max_steps') and self.args.max_steps > 0:
+            num_training_steps = self.args.max_steps
+        else:
+            num_training_steps = steps_per_epoch * self.args.num_train_epochs
         
         self.scheduler = get_scheduler(
             name=self.args.lr_scheduler_type,
@@ -373,20 +377,32 @@ class SmolVLM2InfiniTrainer:
         global_step = 0
         total_loss = 0.0
         
-        # Calculate total steps
-        total_steps = len(train_dataloader) * self.args.num_train_epochs
+        # Calculate total steps based on max_steps or num_train_epochs
+        steps_per_epoch = len(train_dataloader)
+        if hasattr(self.args, 'max_steps') and self.args.max_steps > 0:
+            total_steps = self.args.max_steps
+            effective_epochs = (total_steps + steps_per_epoch - 1) // steps_per_epoch  # Ceiling division
+            logger.info(f"Training for {total_steps} steps (approximately {effective_epochs} epochs)")
+        else:
+            total_steps = steps_per_epoch * self.args.num_train_epochs
+            effective_epochs = int(self.args.num_train_epochs)
+            logger.info(f"Training for {self.args.num_train_epochs} epochs")
         
-        logger.info(f"Training for {self.args.num_train_epochs} epochs")
         logger.info(f"Total training steps: {total_steps}")
         
         # Training loop
-        for epoch in range(int(self.args.num_train_epochs)):
-            logger.info(f"Starting epoch {epoch + 1}/{int(self.args.num_train_epochs)}")
+        for epoch in range(effective_epochs):
+            logger.info(f"Starting epoch {epoch + 1}/{effective_epochs}")
             
             epoch_loss = 0.0
             progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
             
             for step, batch in enumerate(progress_bar):
+                # Check if we've reached max_steps
+                if hasattr(self.args, 'max_steps') and self.args.max_steps > 0 and global_step >= self.args.max_steps:
+                    logger.info(f"Reached max_steps ({self.args.max_steps}). Stopping training.")
+                    break
+                
                 # Move batch to device and ensure dtype consistency
                 model_dtype = next(self.model.parameters()).dtype
                 batch = {
@@ -435,7 +451,8 @@ class SmolVLM2InfiniTrainer:
                 progress_bar.set_postfix({
                     'loss': f'{step_loss:.4f}',
                     'avg_loss': f'{total_loss / global_step:.4f}',
-                    'lr': f'{self.scheduler.get_last_lr()[0]:.2e}'
+                    'lr': f'{self.scheduler.get_last_lr()[0]:.2e}',
+                    'step': f'{global_step}/{total_steps}'
                 })
                 
                 # Save checkpoint
@@ -457,6 +474,11 @@ class SmolVLM2InfiniTrainer:
             if self.args.save_strategy == "epoch":
                 checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-epoch-{epoch + 1}")
                 self.save_checkpoint(checkpoint_dir, global_step)
+            
+            # Check if we've reached max_steps (for early exit from epoch loop)
+            if hasattr(self.args, 'max_steps') and self.args.max_steps > 0 and global_step >= self.args.max_steps:
+                logger.info(f"Reached max_steps ({self.args.max_steps}). Ending training.")
+                break
         
         logger.info("Training completed!")
         logger.info(f"Final average loss: {total_loss / global_step:.4f}")
