@@ -62,7 +62,7 @@ def convert_jsonl_to_nanotron(input_file: str, output_file: str, processor=None)
     # Load processor if not provided
     if processor is None:
         processor = AutoProcessor.from_pretrained(
-            "HuggingFaceTB/SmolVLM2-256M-Instruct",
+            "HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
             trust_remote_code=True
         )
     

@@ -94,7 +94,7 @@ video:
 ### Training Performance Metrics
 
 #### **2-Hour Validation Training**:
-- **Model**: HuggingFaceTB/SmolVLM2-256M-Instruct with Infini-Attention
+- **Model**: HuggingFaceTB/SmolVLM2-256M-Video-Instruct with Infini-Attention
 - **Dataset**: 5,496 NextQA samples
 - **Target**: 500-1000 steps for validation
 - **Results**: ✅ **Excellent convergence demonstrated**

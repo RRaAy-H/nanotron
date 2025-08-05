@@ -219,7 +219,7 @@ For rapid validation that the model is trainable within 2 hours:
 ```bash
 # Quick validation training - completes in ~2 hours
 python scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --train_data_path ./train_data.json \
     --output_dir checkpoints/smolvlm2_infini_quick \
     --per_device_train_batch_size 1 \
@@ -240,7 +240,7 @@ python scripts/train_smolvlm2_infini.py \
 ```bash
 # Test with small sample dataset first
 python scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --data_mixture data/smolvlm2_256m_mixture_test.yaml \
     --image_dir data/sample_data/0_30_s_nextqa_videos_1 \
     --output_dir checkpoints/smolvlm2_infini_test \
@@ -441,7 +441,7 @@ If you encounter "Input type (torch.cuda.FloatTensor) and weight type (CUDABFloa
 ```bash
 # Correct usage with bf16
 python scripts/train_smolvlm2_infini.py \
-    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Instruct \
+    --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
     --bf16 \
     --do_train \
     # ... other arguments
