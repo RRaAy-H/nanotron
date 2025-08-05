@@ -436,7 +436,7 @@ class SmolVLM2InfiniTrainer:
                 loss.backward()
                 
                 # Gradient clipping
-                if self.args.max_grad_norm > 0:
+                if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0:
                     clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
                 
                 # Optimizer step
@@ -459,13 +459,13 @@ class SmolVLM2InfiniTrainer:
                 })
                 
                 # Save checkpoint
-                if self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
+                if self.args.save_steps is not None and self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
                     checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-{global_step}")
                     self.save_checkpoint(checkpoint_dir, global_step)
                 
                 # Evaluation
-                if (self.args.eval_steps > 0 and global_step % self.args.eval_steps == 0 and 
-                    self.eval_dataset is not None):
+                if (self.args.eval_steps is not None and self.args.eval_steps > 0 and 
+                    global_step % self.args.eval_steps == 0 and self.eval_dataset is not None):
                     eval_loss = self.evaluate()
                     logger.info(f"Step {global_step}: eval_loss = {eval_loss:.4f}")
                     self.model.train()  # Set back to training mode
