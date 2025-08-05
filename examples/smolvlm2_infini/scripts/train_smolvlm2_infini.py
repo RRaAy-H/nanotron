@@ -177,8 +177,33 @@ class VisionLanguageDataset(Dataset):
                     logger.warning(f"Video file not found: {video_path}, using placeholder image")
                     image = Image.new('RGB', (224, 224), color=(128, 128, 128))  # Gray placeholder
             else:
-                image_path = os.path.join(self.image_dir, item['image'])
-                image = Image.open(image_path).convert('RGB')
+                # Handle both file paths and embedded base64 image data
+                image_data = item['image']
+                
+                if isinstance(image_data, dict) and "bytes" in image_data:
+                    # Handle embedded base64 image data
+                    import base64
+                    import io
+                    
+                    bytes_data = image_data["bytes"]
+                    if isinstance(bytes_data, dict) and "data" in bytes_data:
+                        base64_data = bytes_data["data"]
+                        # Decode base64 data
+                        image_bytes = base64.b64decode(base64_data)
+                        # Create PIL Image from bytes
+                        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+                    else:
+                        logger.warning(f"Invalid embedded image data structure: {bytes_data}")
+                        image = Image.new('RGB', (224, 224), color=(128, 128, 128))
+                        
+                elif isinstance(image_data, str):
+                    # Handle file path - existing logic
+                    image_path = os.path.join(self.image_dir, image_data)
+                    image = Image.open(image_path).convert('RGB')
+                    
+                else:
+                    logger.warning(f"Unsupported image format: {type(image_data)}")
+                    image = Image.new('RGB', (224, 224), color=(128, 128, 128))
             
             # Get text (from conversations if available, otherwise from text field)
             if 'conversations' in item:
