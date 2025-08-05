@@ -22,6 +22,10 @@ import json
 from PIL import Image
 import logging
 import cv2
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 # Add nanotron to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
@@ -38,6 +42,22 @@ os.environ["RANK"] = "0"
 os.environ["LOCAL_RANK"] = "0"
 os.environ["MASTER_ADDR"] = "localhost"
 os.environ["MASTER_PORT"] = "29501"
+
+@dataclass
+class TensorBoardArguments:
+    """Arguments for TensorBoard logging."""
+    use_tensorboard: bool = field(
+        default=False,
+        metadata={"help": "Enable TensorBoard logging"}
+    )
+    tensorboard_dir: str = field(
+        default="./tensorboard_logs",
+        metadata={"help": "Directory for TensorBoard logs"}
+    )
+    tensorboard_run_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "TensorBoard run name (default: auto-generated)"}
+    )
 
 @dataclass
 class ModelArguments:
@@ -316,6 +336,9 @@ class SmolVLM2InfiniTrainer:
         train_dataset,
         eval_dataset=None,
         processor=None,
+        tensorboard_args=None,
+        model_args=None,
+        data_args=None,
         **kwargs
     ):
         self.model = model
@@ -323,9 +346,71 @@ class SmolVLM2InfiniTrainer:
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.processor = processor
+        self.tensorboard_args = tensorboard_args
+        self.model_args = model_args
+        self.data_args = data_args
+        
+        # Initialize TensorBoard if enabled
+        self.setup_tensorboard()
         
         # Setup optimizer and scheduler
         self.setup_optimizer()
+    
+    def setup_tensorboard(self):
+        """Initialize TensorBoard logging"""
+        self.tensorboard_writer = None
+        
+        if self.tensorboard_args and self.tensorboard_args.use_tensorboard:
+            if SummaryWriter is None:
+                logger.warning("TensorBoard is not available. Install it with: pip install tensorboard")
+                return
+            
+            # Create tensorboard log directory
+            os.makedirs(self.tensorboard_args.tensorboard_dir, exist_ok=True)
+            
+            # Generate run name if not provided
+            if self.tensorboard_args.tensorboard_run_name:
+                run_name = self.tensorboard_args.tensorboard_run_name
+            else:
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                run_name = f"smolvlm2_infini_{timestamp}"
+            
+            # Create log directory for this run
+            log_dir = os.path.join(self.tensorboard_args.tensorboard_dir, run_name)
+            self.tensorboard_writer = SummaryWriter(log_dir=log_dir)
+            
+            # Log hyperparameters
+            hparams = {
+                'learning_rate': self.args.learning_rate,
+                'batch_size': self.args.per_device_train_batch_size,
+                'num_train_epochs': self.args.num_train_epochs,
+                'weight_decay': self.args.weight_decay,
+                'warmup_steps': self.args.warmup_steps,
+                'gradient_accumulation_steps': self.args.gradient_accumulation_steps,
+            }
+            
+            # Add model and data config if available
+            if self.model_args:
+                hparams.update({
+                    'model_name_or_path': str(self.model_args.model_name_or_path),
+                    'use_infini_attention': self.model_args.use_infini_attention,
+                    'segment_length': self.model_args.segment_length,
+                })
+            
+            if self.data_args:
+                hparams.update({
+                    'max_seq_length': self.data_args.max_seq_length,
+                })
+            
+            # Log hyperparameters to tensorboard
+            self.tensorboard_writer.add_hparams(
+                hparam_dict=hparams,
+                metric_dict={'train/loss': 0.0}  # Placeholder metric
+            )
+            
+            logger.info(f"Initialized TensorBoard logging: {log_dir}")
+            logger.info(f"View logs with: tensorboard --logdir={self.tensorboard_args.tensorboard_dir}")
         
     def setup_optimizer(self):
         """Setup optimizer and learning rate scheduler"""
@@ -458,6 +543,13 @@ class SmolVLM2InfiniTrainer:
                     'step': f'{global_step}/{total_steps}'
                 })
                 
+                # Log to TensorBoard
+                if self.tensorboard_writer is not None:
+                    self.tensorboard_writer.add_scalar('train/loss', step_loss, global_step)
+                    self.tensorboard_writer.add_scalar('train/avg_loss', total_loss / global_step, global_step)
+                    self.tensorboard_writer.add_scalar('train/learning_rate', self.scheduler.get_last_lr()[0], global_step)
+                    self.tensorboard_writer.add_scalar('train/epoch', epoch + 1, global_step)
+                
                 # Save checkpoint
                 if self.args.save_steps is not None and self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
                     checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-{global_step}")
@@ -468,10 +560,19 @@ class SmolVLM2InfiniTrainer:
                     global_step % self.args.eval_steps == 0 and self.eval_dataset is not None):
                     eval_loss = self.evaluate()
                     logger.info(f"Step {global_step}: eval_loss = {eval_loss:.4f}")
+                    
+                    # Log eval metrics to TensorBoard
+                    if self.tensorboard_writer is not None:
+                        self.tensorboard_writer.add_scalar('eval/loss', eval_loss, global_step)
+                    
                     self.model.train()  # Set back to training mode
             
             avg_epoch_loss = epoch_loss / len(train_dataloader)
             logger.info(f"Epoch {epoch + 1} completed. Average loss: {avg_epoch_loss:.4f}")
+            
+            # Log epoch metrics to TensorBoard
+            if self.tensorboard_writer is not None:
+                self.tensorboard_writer.add_scalar('train/epoch_loss', avg_epoch_loss, epoch + 1)
             
             # Save at end of epoch
             if self.args.save_strategy == "epoch":
@@ -485,6 +586,11 @@ class SmolVLM2InfiniTrainer:
         
         logger.info("Training completed!")
         logger.info(f"Final average loss: {total_loss / global_step:.4f}")
+        
+        # Log final metrics to TensorBoard
+        if self.tensorboard_writer is not None:
+            self.tensorboard_writer.add_scalar('train/final_loss', total_loss / global_step, global_step)
+            self.tensorboard_writer.flush()
         
         return {
             'train_loss': total_loss / global_step,
@@ -574,13 +680,19 @@ class SmolVLM2InfiniTrainer:
             self.processor.save_pretrained(output_dir)
         
         logger.info(f"Model saved to {output_dir}")
+        
+    def close_tensorboard(self):
+        """Close TensorBoard writer"""
+        if self.tensorboard_writer is not None:
+            self.tensorboard_writer.close()
+            logger.info("Closed TensorBoard logging")
 
 def main():
     """Main training function"""
 
     # Parse arguments
-    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments, TensorBoardArguments))
+    model_args, data_args, training_args, tensorboard_args = parser.parse_args_into_dataclasses()
 
     # Setup logging
     logging.basicConfig(
@@ -693,6 +805,9 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processor=processor,
+        tensorboard_args=tensorboard_args,
+        model_args=model_args,
+        data_args=data_args,
     )
 
     # Train
@@ -701,6 +816,7 @@ def main():
             raise ValueError("Cannot train on empty dataset.")
         trainer.train()
         trainer.save_model()
+        trainer.close_tensorboard()  # Close TensorBoard logging
 
     # Evaluate
     if training_args.do_eval and eval_dataset is not None:
