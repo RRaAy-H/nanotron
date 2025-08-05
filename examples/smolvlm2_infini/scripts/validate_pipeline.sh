@@ -164,6 +164,12 @@ for dataset in "${key_datasets[@]}"; do
         echo ""
         echo "Inspecting $dataset..."
         
+        # Check if dataset is empty (skipped)
+        if [[ $(wc -c < "$dataset_path" | tr -d ' ') -le 2 ]]; then
+            print_warning "⚠ $dataset is empty (likely skipped via sampling_strategy)"
+            continue
+        fi
+        
         if python scripts/debug_data_pipeline.py \
             --dataset "$dataset_path" \
             --inspect \

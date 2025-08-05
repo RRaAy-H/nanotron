@@ -1527,6 +1527,14 @@ class CPUOptimizedDataLoader:
     def _process_single_dataset(self, config: Dict) -> int:
         """Process a single dataset configuration with maximum CPU optimization"""
         try:
+            # Check for skip conditions
+            if config.get("_skip", False) or config.get("samples", 0) == 0:
+                print(f"Skipping {config['name']} due to skip flag or 0 samples")
+                # Create empty JSON file for consistency
+                with open(config["output"], "w") as f:
+                    json.dump([], f)
+                return 0
+                
             samples = []
             
             # Add format validation
@@ -1655,19 +1663,22 @@ def main():
         # Multi-image datasets (12.3% total)
         {
             "name": "m4_instruct_data",
-            "samples": 104000,
+            "samples": 0,  # Changed from 104000 to 0 - SKIPPED
             "output": f"{args.output_dir}/m4_instruct_data.json",
             "modality": "multi-image",
             "path": f"{args.base_path}/M4-Instruct-Data",
-            "format": "zip_directory"
+            "format": "zip_directory",
+            "_skip": True,  # Skip marker
+            "_comment": "SKIPPED - use sampling_strategy: skip in YAML - change samples to 104000 and remove _skip to re-enable"
         },
         {
             "name": "mammoth_multi_image",
-            "samples": 19000,
+            "samples": 123000,  # Increased from 19000 to 123000 (6.5x upsampling)
             "output": f"{args.output_dir}/mammoth_multi_image.json",
             "modality": "multi-image",
             "path": f"{args.base_path}/MAmmoTH-VL-Instruct-12M/multi_image_data",
-            "format": "mammoth_tar"  # MAmmoTH-specific format with large JSON annotation file
+            "format": "mammoth_tar",  # MAmmoTH-specific format with large JSON annotation file
+            "_comment": "UPSAMPLED to compensate for M4-Instruct-Data skip (was 19000 samples)"
         },
         
         # Image datasets (34.4% total)

@@ -199,17 +199,17 @@ text:
 # Multi-image datasets (12.3% of total)
 multiimage:
   - json_path: data/datasets/m4_instruct_data.json
-    sampling_strategy: all
+    sampling_strategy: skip
     name: m4-instruct-data
     path: ""
     modality: multi-image
     source: m4-instruct-data
-    _comment: 'M4 Instruct Data - 10.4%'
+    _comment: 'M4 Instruct Data - SKIPPED (was 10.4%) - change to "all" to re-enable'
 
   - json_path: data/datasets/mammoth_multi_image.json
-    sampling_strategy: all
+    sampling_strategy: random:650%
     name: mammoth-multi-image
     path: ""
     modality: multi-image
     source: mammoth
-    _comment: 'MammoTH multi-image data - 1.9%'
+    _comment: 'MammoTH multi-image data - UPSAMPLED to 12.3% (was 1.9%) to compensate for M4 skip'

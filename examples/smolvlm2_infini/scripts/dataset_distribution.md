@@ -4,12 +4,28 @@ This document outlines the multimodal dataset composition with specific data sam
 
 ## Overview: Data Split by Modality
 
-| Modality | Percentage | 
-|----------|------------|
-| Image | 34.4% | 
-| Video | 33.0% | 
-| Text | 20.2% | 
-| Multi-image | 12.3% |
+| Modality | Percentage | Notes |
+|----------|------------|-------|
+| Image | 34.4% | Unchanged |
+| Video | 33.0% | Unchanged |
+| Text | 20.2% | Unchanged |
+| Multi-image | 12.3% | **Modified**: M4-Instruct-Data skipped, Mammoth upsampled 6.5x |
+
+**Total Dataset Size**: ~896K samples (reduced from ~1M due to M4-Instruct-Data skip)
+
+## Dataset Skipping and Upsampling Strategy
+
+The current configuration demonstrates a flexible approach to dataset management:
+
+### Skip Functionality
+- **M4-Instruct-Data**: Uses `sampling_strategy: skip` in the YAML configuration
+- **Benefits**: Avoids dependency issues, reduces training time, maintains pipeline integrity
+- **Re-enabling**: Simply change `sampling_strategy: skip` to `sampling_strategy: all`
+
+### Compensation Strategy  
+- **Mammoth Multi-image**: Upsampled from 19K to 123K samples (6.5x increase)
+- **Method**: Uses `sampling_strategy: random:650%` for balanced upsampling
+- **Result**: Maintains 12.3% multi-image representation in the overall dataset
 
 ## Detailed Dataset Breakdown
 
@@ -26,10 +42,12 @@ All text datasets are in parquet format and located at `/data1/yihao/LLaVA-OneVi
 
 ### Multi-image Datasets (12.3% total)
 
-| Dataset | Percentage | Format | Path |
-|---------|------------|--------|------|
-| m4-instruct-data/ | 10.4% | ZIP | `/data1/yihao/M4-Instruct-Data` |
-| mammoth/multi_image_data/shard_1.tar.gz | 1.9% | TAR.GZ | `/data1/yihao/MAmmoTH-VL-Instruct-12M/multi_image_data` |
+| Dataset | Percentage | Format | Path | Status |
+|---------|------------|--------|------|--------|
+| m4-instruct-data/ | 0% (SKIPPED) | ZIP | `/data1/yihao/M4-Instruct-Data` | **Configurable** - set `sampling_strategy: all` to re-enable |
+| mammoth/multi_image_data/shard_1.tar.gz | 12.3% (UPSAMPLED) | TAR.GZ | `/data1/yihao/MAmmoTH-VL-Instruct-12M/multi_image_data` | **Compensates for M4-Instruct-Data skip** (was 1.9%, now 6.5x upsampled) |
+
+**Note**: M4-Instruct-Data is currently skipped using `sampling_strategy: skip` in the YAML configuration. This allows for easy re-enabling in the future while maintaining the overall dataset balance through mammoth upsampling.
 
 ### Image Datasets (34.4% total)
 
