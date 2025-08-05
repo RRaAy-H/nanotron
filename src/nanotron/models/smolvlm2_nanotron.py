@@ -11,64 +11,118 @@ from nanotron.parallel.tensor_parallel.nn import TensorParallelColumnLinear, Ten
 from nanotron.models.llama import LlamaModel  # For infini-attention integration
 
 
-class SmolVLM2NanotronModel(NanotronModel):
-    """SmolVLM2 model adapted for Nanotron with infini-attention support"""
+# class SmolVLM2NanotronModel(NanotronModel):
+#     """SmolVLM2 model adapted for Nanotron with infini-attention support"""
     
-    def __init__(self, config, parallel_context: ParallelContext):
+#     def __init__(self, config, parallel_context: ParallelContext):
+#         super().__init__()
+#         self.config = config
+#         self.parallel_context = parallel_context
+        
+#         # Use Idefics3VisionModel directly (contains SigLIP) - same as SmolVLM2
+#         self.vision_model = Idefics3VisionTransformer(config.vision_config)
+        
+#         # Tensor parallel connector for vision-language fusion
+#         self.connector = self._build_tensor_parallel_connector(config)
+        
+#         # Use Nanotron's LlamaModel with infini-attention for text processing
+#         self.text_model = LlamaModel(
+#             config=config.text_config,
+#             parallel_context=parallel_context
+#         )
+        
+#         # Language modeling head
+#         self.lm_head = TensorParallelColumnLinear(
+#             in_features=config.text_config.hidden_size,
+#             out_features=config.text_config.vocab_size,
+#             pg=parallel_context.tp_pg,
+#             bias=False
+#         )
+        
+#         # Image token and sequence length (from Idefics3 config)
+#         self.image_token_id = getattr(config, 'image_token_id', 32000)
+#         self.image_seq_len = config.perceiver_config.resampler_n_latents
+    
+#     def _build_tensor_parallel_connector(self, config):
+#         """Build tensor parallel version of connector for Idefics3"""
+#         class TensorParallelIdefics3Connector(nn.Module):
+#             def __init__(self, config, parallel_context):
+#                 super().__init__()
+#                 # Use the perceiver directly from idefics3.modeling_idefics3
+#                 from transformers.models.idefics3.modeling_idefics3 import Idefics3Perceiver
+#                 self.perceiver = Idefics3Perceiver(config.perceiver_config)
+                
+#                 # Replace the projection with tensor parallel version
+#                 self.modality_projection = TensorParallelRowLinear(
+#                     in_features=config.perceiver_config.resampler_head_dim,
+#                     out_features=config.text_config.hidden_size,
+#                     pg=parallel_context.tp_pg,
+#                     bias=False
+#                 )
+        
+#             def forward(self, image_hidden_states, attention_mask=None):
+#                 image_hidden_states = self.perceiver(
+#                     context=image_hidden_states,
+#                     attention_mask=attention_mask
+#                 )
+#                 image_hidden_states = self.modality_projection(image_hidden_states)
+#                 return image_hidden_states
+    
+#         return TensorParallelIdefics3Connector(config, self.parallel_context)
+
+
+class SmolVLM2NanotronModel(NanotronModel):
+    """SmolVLM2 model adapted for Nanotron with Infini-Attention support"""
+
+    def __init__(self, config, parallel_context: ParallelContext, parallel_config):
         super().__init__()
         self.config = config
         self.parallel_context = parallel_context
-        
-        # Use Idefics3VisionModel directly (contains SigLIP) - same as SmolVLM2
+        self.parallel_config = parallel_config
+
+        # Vision encoder
         self.vision_model = Idefics3VisionTransformer(config.vision_config)
-        
-        # Tensor parallel connector for vision-language fusion
+
+        # Connector: direct projection
         self.connector = self._build_tensor_parallel_connector(config)
-        
-        # Use Nanotron's LlamaModel with infini-attention for text processing
+
+        # Text model
         self.text_model = LlamaModel(
             config=config.text_config,
-            parallel_context=parallel_context
+            parallel_context=parallel_context,
+            parallel_config=parallel_config
         )
-        
-        # Language modeling head
+
+        # LM head
         self.lm_head = TensorParallelColumnLinear(
             in_features=config.text_config.hidden_size,
             out_features=config.text_config.vocab_size,
             pg=parallel_context.tp_pg,
-            bias=False
+            bias=False,
+            mode="tp"
         )
-        
-        # Image token and sequence length (from Idefics3 config)
+
         self.image_token_id = getattr(config, 'image_token_id', 32000)
-        self.image_seq_len = config.perceiver_config.resampler_n_latents
-    
+        self.image_seq_len = getattr(config.vision_config, 'seq_len', 64)
+
     def _build_tensor_parallel_connector(self, config):
-        """Build tensor parallel version of connector for Idefics3"""
+        """Simplified connector using direct projection from image embeddings"""
         class TensorParallelIdefics3Connector(nn.Module):
             def __init__(self, config, parallel_context):
                 super().__init__()
-                # Use the perceiver directly from idefics3.modeling_idefics3
-                from transformers.models.idefics3.modeling_idefics3 import Idefics3Connector
-                self.perceiver = Idefics3Connector(config.perceiver_config)
-                
-                # Replace the projection with tensor parallel version
                 self.modality_projection = TensorParallelRowLinear(
-                    in_features=config.perceiver_config.resampler_head_dim,
+                    in_features=config.vision_config.hidden_size,
                     out_features=config.text_config.hidden_size,
                     pg=parallel_context.tp_pg,
-                    bias=False
+                    bias=False,
+                    mode="tp"
                 )
-        
+
             def forward(self, image_hidden_states, attention_mask=None):
-                image_hidden_states = self.perceiver(
-                    context=image_hidden_states,
-                    attention_mask=attention_mask
-                )
-                image_hidden_states = self.modality_projection(image_hidden_states)
-                return image_hidden_states
-    
+                return self.modality_projection(image_hidden_states)
+
         return TensorParallelIdefics3Connector(config, self.parallel_context)
+
     
     def inputs_merger(
         self,

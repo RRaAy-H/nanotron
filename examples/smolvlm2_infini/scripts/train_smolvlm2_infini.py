@@ -33,6 +33,12 @@ from nanotron.parallel.context import ParallelContext
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+os.environ["WORLD_SIZE"] = "1"
+os.environ["RANK"] = "0"
+os.environ["LOCAL_RANK"] = "0"
+os.environ["MASTER_ADDR"] = "localhost"
+os.environ["MASTER_PORT"] = "29501"
+
 @dataclass
 class ModelArguments:
     """Arguments pertaining to which model/config/tokenizer we are going to fine-tune."""
@@ -178,12 +184,9 @@ class VisionLanguageDataset(Dataset):
                     image = Image.new('RGB', (224, 224), color=(128, 128, 128))  # Gray placeholder
             else:
                 # Handle both file paths and embedded base64 image data
-                image_data = item.get('image')
+                image_data = item['image']
                 
-                if image_data is None:
-                    # Handle text-only samples - no image needed
-                    image = None
-                elif isinstance(image_data, dict) and "bytes" in image_data:
+                if isinstance(image_data, dict) and "bytes" in image_data:
                     # Handle embedded base64 image data
                     import base64
                     import io
@@ -221,26 +224,15 @@ class VisionLanguageDataset(Dataset):
             else:
                 text = item['text']
             
-            # Process inputs - handle text-only vs multimodal
-            if image is None:
-                # Text-only processing - no image
-                inputs = self.processor(
-                    text=text,
-                    return_tensors="pt",
-                    max_length=self.max_length,
-                    truncation=True,
-                    padding="max_length"
-                )
-            else:
-                # Multimodal processing - with image
-                inputs = self.processor(
-                    images=image,
-                    text=text,
-                    return_tensors="pt",
-                    max_length=self.max_length,
-                    truncation=True,
-                    padding="max_length"
-                )
+            # Process inputs
+            inputs = self.processor(
+                images=image,
+                text=text,
+                return_tensors="pt",
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length"
+            )
             
             # Remove batch dimension
             for key in inputs:
@@ -251,10 +243,12 @@ class VisionLanguageDataset(Dataset):
             
         except Exception as e:
             logger.warning(f"Error loading sample {idx}: {e}")
-            # Return a dummy text-only sample in case of error
+            # Return a dummy sample in case of error
+            dummy_image = Image.new('RGB', (224, 224), color='white')
             dummy_text = "Error loading sample"
             
             inputs = self.processor(
+                images=dummy_image,
                 text=dummy_text,
                 return_tensors="pt",
                 max_length=self.max_length,
@@ -517,101 +511,115 @@ class SmolVLM2InfiniTrainer:
 
 def main():
     """Main training function"""
-    
+
     # Parse arguments
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    
+
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-    
+
     # Load processor
-    processor = AutoProcessor.from_pretrained(
-        model_args.model_name_or_path,
-        trust_remote_code=model_args.trust_remote_code,
-    )
-    
+    try:
+        processor = AutoProcessor.from_pretrained(
+            model_args.model_name_or_path,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+    except Exception as e:
+        logger.warning(f"Could not load processor: {e}")
+        processor = None
+
     # Load model
     try:
-        # First try loading with AutoModel instead of AutoModelForVision2Seq
         from transformers import AutoModel
         model = AutoModel.from_pretrained(
             model_args.model_name_or_path,
             trust_remote_code=True,
             torch_dtype=torch.bfloat16 if training_args.bf16 else torch.float32,
         )
-        
-        # Replace attention layers with infini-attention if requested
+
         if model_args.use_infini_attention:
             model = replace_attention_with_infini(model, model_args.segment_length)
-    
+
     except Exception as e:
-        logger.warning(f"Could not load SmolVLM2 model: {e}")
+        logger.warning(f"Could not load pretrained model: {e}")
         logger.info("Creating new SmolVLM2NanotronModel instead")
-        
-        # Create config for new model
+
         sys.path.append(os.path.join(os.path.dirname(__file__), "..", "configs"))
         from smolvlm2_config import SmolVLM2Config
-        
         config = SmolVLM2Config(
             use_infini_attention=model_args.use_infini_attention,
-            segment_length=model_args.segment_length
+            segment_length=model_args.segment_length,
         )
-        
-        # Create parallel context (single GPU for now)
+
         parallel_context = ParallelContext(
             data_parallel_size=1,
             pipeline_parallel_size=1,
-            tensor_parallel_size=1
+            tensor_parallel_size=1,
         )
-        
-        # Create the model with parallel context
-        model = SmolVLM2NanotronModel(config, parallel_context)
-    
-    # Set trainable parameters
+        from nanotron.parallel.config import ParallelConfig
+        parallel_config = ParallelConfig.from_args(training_args)
+        model = SmolVLM2NanotronModel(config, parallel_context, parallel_config)
+
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-    
-    # Prepare datasets
+
     logger.info("Loading datasets...")
-    
+
     try:
-        # Load training dataset
-        if os.path.exists(data_args.train_data_path):
+        if os.path.isdir(data_args.train_data_path):
+            logger.info(f"Loading dataset from directory: {data_args.train_data_path}")
+            all_data = []
+            for filename in sorted(os.listdir(data_args.train_data_path)):
+                if filename.endswith(".json"):
+                    path = os.path.join(data_args.train_data_path, filename)
+                    try:
+                        with open(path, "r") as f:
+                            data = json.load(f)
+                            all_data.extend(data)
+                            logger.info(f"Loaded {len(data)} samples from {filename}")
+                    except Exception as e:
+                        logger.warning(f"Failed to load {filename}: {e}")
+
+            if len(all_data) == 0:
+                raise ValueError("Merged training dataset is empty. Cannot proceed.")
+
+            merged_path = "/tmp/merged_train_data.json"
+            with open(merged_path, "w") as f:
+                json.dump(all_data, f)
+            logger.info(f"Merged dataset saved to {merged_path}")
+
+            data_args.train_data_path = merged_path
             train_dataset = VisionLanguageDataset(
-                data_path=data_args.train_data_path,
+                data_path=merged_path,
                 image_dir=data_args.image_dir,
                 processor=processor,
-                max_length=data_args.max_seq_length
+                max_length=data_args.max_seq_length,
             )
+
         else:
-            logger.warning(f"Training data not found at {data_args.train_data_path}")
-            # Create dummy dataset for testing
-            train_dataset = []
-        
-        # Load evaluation dataset
+            raise FileNotFoundError(f"Training data path {data_args.train_data_path} is invalid.")
+
         eval_dataset = None
         if data_args.eval_data_path and os.path.exists(data_args.eval_data_path):
             eval_dataset = VisionLanguageDataset(
                 data_path=data_args.eval_data_path,
                 image_dir=data_args.image_dir,
                 processor=processor,
-                max_length=data_args.max_seq_length
+                max_length=data_args.max_seq_length,
             )
             logger.info(f"Loaded evaluation dataset with {len(eval_dataset)} samples")
         else:
             logger.info("No evaluation dataset provided")
-            
+
     except Exception as e:
         logger.error(f"Error loading datasets: {e}")
-        logger.info("Creating empty datasets for testing")
-        train_dataset = []
-        eval_dataset = None
-    
+        raise RuntimeError("Fatal error in dataset loading.")
+
     # Create trainer
     trainer = SmolVLM2InfiniTrainer(
         model=model,
@@ -620,22 +628,23 @@ def main():
         eval_dataset=eval_dataset,
         processor=processor,
     )
-    
+
     # Train
     if training_args.do_train:
+        if len(train_dataset) == 0:
+            raise ValueError("Cannot train on empty dataset.")
         trainer.train()
         trainer.save_model()
-    
+
     # Evaluate
     if training_args.do_eval and eval_dataset is not None:
         eval_results = trainer.evaluate()
         logger.info(f"Evaluation results: {eval_results}")
-        
-        # Save evaluation results
         eval_output_path = os.path.join(training_args.output_dir, "eval_results.json")
-        with open(eval_output_path, 'w') as f:
+        with open(eval_output_path, "w") as f:
             json.dump({'eval_loss': eval_results}, f, indent=2)
         logger.info(f"Evaluation results saved to {eval_output_path}")
+
 
 if __name__ == "__main__":
     main()
