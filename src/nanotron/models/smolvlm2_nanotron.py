@@ -49,8 +49,8 @@ class SmolVLM2NanotronModel(NanotronModel):
             def __init__(self, config, parallel_context):
                 super().__init__()
                 # Use the perceiver directly from idefics3.modeling_idefics3
-                from transformers.models.idefics3.modeling_idefics3 import Idefics3Perceiver
-                self.perceiver = Idefics3Perceiver(config.perceiver_config)
+                from transformers.models.idefics3.modeling_idefics3 import Idefics3Connector
+                self.perceiver = Idefics3Connector(config.perceiver_config)
                 
                 # Replace the projection with tensor parallel version
                 self.modality_projection = TensorParallelRowLinear(
