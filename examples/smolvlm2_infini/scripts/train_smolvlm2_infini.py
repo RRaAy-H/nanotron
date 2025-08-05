@@ -258,33 +258,24 @@ class VisionLanguageDataset(Dataset):
                 else:
                     text = item.get('text', 'Sample without text')
                 
-                # Count image tokens in the original text
+                # Remove all image placeholders from text-only samples since we don't have actual images
                 import re
-                image_tokens = re.findall(r'<image>', text)
-                num_images_in_text = len(image_tokens)
+                text = re.sub(r'<image>', '', text).strip()
                 
-                if num_images_in_text == 0:
-                    # Truly text-only sample - no image processing needed
-                    inputs = self.processor(
-                        text=text if text else "Text-only sample",
-                        return_tensors="pt",
-                        max_length=self.max_length,
-                        truncation=True,
-                        padding="max_length"
-                    )
-                else:
-                    # Text has image placeholders but no actual images provided
-                    # Create dummy images to match the number of image tokens
-                    dummy_images = [Image.new('RGB', (224, 224), color='white') for _ in range(num_images_in_text)]
-                    
-                    inputs = self.processor(
-                        images=dummy_images,
-                        text=text,
-                        return_tensors="pt",
-                        max_length=self.max_length,
-                        truncation=True,
-                        padding="max_length"
-                    )
+                # Clean up any extra whitespace
+                text = re.sub(r'\s+', ' ', text).strip()
+                
+                if not text:
+                    text = "Text-only sample"
+                
+                # Process as text-only (no images)
+                inputs = self.processor(
+                    text=text,
+                    return_tensors="pt",
+                    max_length=self.max_length,
+                    truncation=True,
+                    padding="max_length"
+                )
                 
                 # Remove batch dimension
                 for key in inputs:
