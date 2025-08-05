@@ -22,6 +22,7 @@ import json
 from PIL import Image
 import logging
 import cv2
+import torch.distributed as dist
 try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
@@ -42,6 +43,15 @@ os.environ["RANK"] = "0"
 os.environ["LOCAL_RANK"] = "0"
 os.environ["MASTER_ADDR"] = "localhost"
 os.environ["MASTER_PORT"] = "29501"
+
+# Initialize distributed training if not already initialized
+def initialize_distributed():
+    if not dist.is_initialized():
+        dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo', init_method='env://')
+
+def cleanup_distributed():
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 @dataclass
 class TensorBoardArguments:
@@ -378,39 +388,23 @@ class SmolVLM2InfiniTrainer:
             
             # Create log directory for this run
             log_dir = os.path.join(self.tensorboard_args.tensorboard_dir, run_name)
-            self.tensorboard_writer = SummaryWriter(log_dir=log_dir)
+            os.makedirs(log_dir, exist_ok=True)  # Ensure directory exists
             
-            # Log hyperparameters
-            hparams = {
-                'learning_rate': self.args.learning_rate,
-                'batch_size': self.args.per_device_train_batch_size,
-                'num_train_epochs': self.args.num_train_epochs,
-                'weight_decay': self.args.weight_decay,
-                'warmup_steps': self.args.warmup_steps,
-                'gradient_accumulation_steps': self.args.gradient_accumulation_steps,
-            }
-            
-            # Add model and data config if available
-            if self.model_args:
-                hparams.update({
-                    'model_name_or_path': str(self.model_args.model_name_or_path),
-                    'use_infini_attention': self.model_args.use_infini_attention,
-                    'segment_length': self.model_args.segment_length,
-                })
-            
-            if self.data_args:
-                hparams.update({
-                    'max_seq_length': self.data_args.max_seq_length,
-                })
-            
-            # Log hyperparameters to tensorboard
-            self.tensorboard_writer.add_hparams(
-                hparam_dict=hparams,
-                metric_dict={'train/loss': 0.0}  # Placeholder metric
-            )
-            
-            logger.info(f"Initialized TensorBoard logging: {log_dir}")
-            logger.info(f"View logs with: tensorboard --logdir={self.tensorboard_args.tensorboard_dir}")
+            try:
+                self.tensorboard_writer = SummaryWriter(log_dir=log_dir)
+                logger.info(f"✓ TensorBoard writer initialized successfully: {log_dir}")
+                
+                # Test write to ensure it's working
+                self.tensorboard_writer.add_scalar('test/initialization', 1.0, 0)
+                self.tensorboard_writer.flush()
+                
+                logger.info(f"✓ TensorBoard test write successful")
+                logger.info(f"🚀 View logs with: tensorboard --logdir={self.tensorboard_args.tensorboard_dir}")
+                
+            except Exception as e:
+                logger.error(f"Failed to initialize TensorBoard writer: {e}")
+                self.tensorboard_writer = None
+                return
         
     def setup_optimizer(self):
         """Setup optimizer and learning rate scheduler"""
@@ -443,6 +437,12 @@ class SmolVLM2InfiniTrainer:
     def train(self):
         """Main training loop"""
         logger.info("Starting training...")
+        
+        # Debug: Check if TensorBoard is enabled
+        if self.tensorboard_writer is not None:
+            logger.info("📊 TensorBoard logging is ENABLED")
+        else:
+            logger.info("⚠️  TensorBoard logging is DISABLED")
         
         # Move model to device and ensure proper dtype
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -545,10 +545,21 @@ class SmolVLM2InfiniTrainer:
                 
                 # Log to TensorBoard
                 if self.tensorboard_writer is not None:
-                    self.tensorboard_writer.add_scalar('train/loss', step_loss, global_step)
-                    self.tensorboard_writer.add_scalar('train/avg_loss', total_loss / global_step, global_step)
-                    self.tensorboard_writer.add_scalar('train/learning_rate', self.scheduler.get_last_lr()[0], global_step)
-                    self.tensorboard_writer.add_scalar('train/epoch', epoch + 1, global_step)
+                    try:
+                        self.tensorboard_writer.add_scalar('train/loss', step_loss, global_step)
+                        self.tensorboard_writer.add_scalar('train/avg_loss', total_loss / global_step, global_step)
+                        self.tensorboard_writer.add_scalar('train/learning_rate', self.scheduler.get_last_lr()[0], global_step)
+                        self.tensorboard_writer.add_scalar('train/epoch', epoch + 1, global_step)
+                        
+                        # Flush every few steps to ensure data is written
+                        if global_step % 5 == 0:
+                            self.tensorboard_writer.flush()
+                            
+                        # Debug log every 10 steps
+                        if global_step % 10 == 0:
+                            logger.info(f"📊 TensorBoard logged step {global_step}: loss={step_loss:.4f}")
+                    except Exception as e:
+                        logger.warning(f"Failed to log to TensorBoard at step {global_step}: {e}")
                 
                 # Save checkpoint
                 if self.args.save_steps is not None and self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
@@ -563,7 +574,12 @@ class SmolVLM2InfiniTrainer:
                     
                     # Log eval metrics to TensorBoard
                     if self.tensorboard_writer is not None:
-                        self.tensorboard_writer.add_scalar('eval/loss', eval_loss, global_step)
+                        try:
+                            self.tensorboard_writer.add_scalar('eval/loss', eval_loss, global_step)
+                            self.tensorboard_writer.flush()
+                            logger.info(f"📊 TensorBoard logged eval at step {global_step}: eval_loss={eval_loss:.4f}")
+                        except Exception as e:
+                            logger.warning(f"Failed to log eval metrics to TensorBoard: {e}")
                     
                     self.model.train()  # Set back to training mode
             
@@ -572,7 +588,12 @@ class SmolVLM2InfiniTrainer:
             
             # Log epoch metrics to TensorBoard
             if self.tensorboard_writer is not None:
-                self.tensorboard_writer.add_scalar('train/epoch_loss', avg_epoch_loss, epoch + 1)
+                try:
+                    self.tensorboard_writer.add_scalar('train/epoch_loss', avg_epoch_loss, epoch + 1)
+                    self.tensorboard_writer.flush()
+                    logger.info(f"📊 TensorBoard logged epoch {epoch + 1}: avg_loss={avg_epoch_loss:.4f}")
+                except Exception as e:
+                    logger.warning(f"Failed to log epoch metrics to TensorBoard: {e}")
             
             # Save at end of epoch
             if self.args.save_strategy == "epoch":
@@ -589,8 +610,12 @@ class SmolVLM2InfiniTrainer:
         
         # Log final metrics to TensorBoard
         if self.tensorboard_writer is not None:
-            self.tensorboard_writer.add_scalar('train/final_loss', total_loss / global_step, global_step)
-            self.tensorboard_writer.flush()
+            try:
+                self.tensorboard_writer.add_scalar('train/final_loss', total_loss / global_step, global_step)
+                self.tensorboard_writer.flush()
+                logger.info(f"📊 TensorBoard logged final metrics: final_loss={total_loss / global_step:.4f}")
+            except Exception as e:
+                logger.warning(f"Failed to log final metrics to TensorBoard: {e}")
         
         return {
             'train_loss': total_loss / global_step,
@@ -684,11 +709,20 @@ class SmolVLM2InfiniTrainer:
     def close_tensorboard(self):
         """Close TensorBoard writer"""
         if self.tensorboard_writer is not None:
-            self.tensorboard_writer.close()
-            logger.info("Closed TensorBoard logging")
+            try:
+                self.tensorboard_writer.flush()
+                self.tensorboard_writer.close()
+                logger.info("✓ Closed TensorBoard logging successfully")
+            except Exception as e:
+                logger.warning(f"Error closing TensorBoard writer: {e}")
+            finally:
+                self.tensorboard_writer = None
 
 def main():
     """Main training function"""
+    
+    # Initialize distributed training
+    initialize_distributed()
 
     # Parse arguments
     parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments, TensorBoardArguments))
@@ -810,22 +844,28 @@ def main():
         data_args=data_args,
     )
 
-    # Train
-    if training_args.do_train:
-        if len(train_dataset) == 0:
-            raise ValueError("Cannot train on empty dataset.")
-        trainer.train()
-        trainer.save_model()
-        trainer.close_tensorboard()  # Close TensorBoard logging
+    try:
+        # Train
+        if training_args.do_train:
+            if len(train_dataset) == 0:
+                raise ValueError("Cannot train on empty dataset.")
+            trainer.train()
+            trainer.save_model()
+            trainer.close_tensorboard()  # Close TensorBoard logging
 
-    # Evaluate
-    if training_args.do_eval and eval_dataset is not None:
-        eval_results = trainer.evaluate()
-        logger.info(f"Evaluation results: {eval_results}")
-        eval_output_path = os.path.join(training_args.output_dir, "eval_results.json")
-        with open(eval_output_path, "w") as f:
-            json.dump({'eval_loss': eval_results}, f, indent=2)
-        logger.info(f"Evaluation results saved to {eval_output_path}")
+        # Evaluate
+        if training_args.do_eval and eval_dataset is not None:
+            eval_results = trainer.evaluate()
+            logger.info(f"Evaluation results: {eval_results}")
+            eval_output_path = os.path.join(training_args.output_dir, "eval_results.json")
+            with open(eval_output_path, "w") as f:
+                json.dump({'eval_loss': eval_results}, f, indent=2)
+            logger.info(f"Evaluation results saved to {eval_output_path}")
+    
+    finally:
+        # Clean up distributed training
+        cleanup_distributed()
+        logger.info("Cleaned up distributed training resources")
 
 
 if __name__ == "__main__":
