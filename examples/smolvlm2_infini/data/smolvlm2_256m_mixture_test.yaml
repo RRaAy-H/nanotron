@@ -1,0 +1,20 @@
+# Small test dataset mixture for initial training validation
+# Using only the sample NextQA data for quick testing
+
+# Video datasets (100% of small test set)
+video:
+  - json_path: data/sample_data/0_30_s_nextqa_mc_qa_processed.json
+    sampling_strategy: all
+    name: nextqa-test-mc
+    path: data/sample_data/0_30_s_nextqa_videos_1
+    modality: video
+    source: nextqa-sample
+    _comment: 'NextQA multiple choice test dataset for validation'
+
+  - json_path: data/sample_data/0_30_s_nextqa_oe_qa_processed.json
+    sampling_strategy: all
+    name: nextqa-test-oe
+    path: data/sample_data/0_30_s_nextqa_videos_1
+    modality: video
+    source: nextqa-sample
+    _comment: 'NextQA open-ended test dataset for validation'

@@ -21,6 +21,7 @@ import yaml
 import json
 from PIL import Image
 import logging
+import cv2
 
 # Add nanotron to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
@@ -141,12 +142,56 @@ class VisionLanguageDataset(Dataset):
         item = self.data[idx]
         
         try:
-            # Load image
-            image_path = os.path.join(self.image_dir, item['image'])
-            image = Image.open(image_path).convert('RGB')
+            # Load image (from video frame if video field exists, otherwise from image field)
+            if 'video' in item:
+                video_path = os.path.join(self.image_dir, item['video'])
+                # Extract first frame from video with improved error handling
+                if os.path.exists(video_path):
+                    cap = cv2.VideoCapture(video_path)
+                    
+                    # Set video codec and options to avoid scaling issues
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    
+                    ret, frame = cap.read()
+                    cap.release()
+                    
+                    if ret and frame is not None:
+                        # Check if frame has valid dimensions
+                        if frame.shape[0] > 0 and frame.shape[1] > 0:
+                            # Convert BGR to RGB and create PIL Image
+                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            image = Image.fromarray(frame_rgb)
+                            
+                            # Resize to standard dimensions to avoid scaling issues
+                            image = image.resize((224, 224), Image.Resampling.LANCZOS)
+                        else:
+                            # Invalid frame dimensions, use placeholder
+                            logger.warning(f"Invalid frame dimensions for {video_path}, using placeholder")
+                            image = Image.new('RGB', (224, 224), color=(128, 128, 128))
+                    else:
+                        # Fallback to a blank image if video reading fails
+                        logger.warning(f"Failed to read frame from {video_path}, using placeholder")
+                        image = Image.new('RGB', (224, 224), color='black')
+                else:
+                    # Video file doesn't exist, create a placeholder image
+                    logger.warning(f"Video file not found: {video_path}, using placeholder image")
+                    image = Image.new('RGB', (224, 224), color=(128, 128, 128))  # Gray placeholder
+            else:
+                image_path = os.path.join(self.image_dir, item['image'])
+                image = Image.open(image_path).convert('RGB')
             
-            # Get text
-            text = item['text']
+            # Get text (from conversations if available, otherwise from text field)
+            if 'conversations' in item:
+                # Convert conversations to text format
+                text_parts = []
+                for conv in item['conversations']:
+                    if conv['from'] == 'human':
+                        text_parts.append(f"User: {conv['value']}")
+                    elif conv['from'] == 'gpt':
+                        text_parts.append(f"Assistant: {conv['value']}")
+                text = "\n".join(text_parts)
+            else:
+                text = item['text']
             
             # Process inputs
             inputs = self.processor(
@@ -235,10 +280,13 @@ class SmolVLM2InfiniTrainer:
         """Main training loop"""
         logger.info("Starting training...")
         
-        # Move model to device
+        # Move model to device and ensure proper dtype
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(device)
+        target_dtype = torch.bfloat16 if self.args.bf16 else torch.float32
+        self.model.to(device=device, dtype=target_dtype)
         self.model.train()
+        
+        logger.info(f"Model moved to {device} with dtype {target_dtype}")
         
         # Create data loader
         train_dataloader = DataLoader(
@@ -267,13 +315,28 @@ class SmolVLM2InfiniTrainer:
             progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
             
             for step, batch in enumerate(progress_bar):
-                # Move batch to device
-                batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+                # Move batch to device and ensure dtype consistency
+                model_dtype = next(self.model.parameters()).dtype
+                batch = {
+                    k: v.to(device=device, dtype=model_dtype) if torch.is_tensor(v) and v.dtype.is_floating_point 
+                    else v.to(device) if torch.is_tensor(v) 
+                    else v 
+                    for k, v in batch.items()
+                }
                 
                 # Forward pass
                 try:
                     outputs = self.model(**batch)
                     loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                    
+                    # Debug: print loss shape and type
+                    if step == 0:
+                        logger.info(f"Loss shape: {loss.shape}, Loss type: {type(loss)}")
+                    
+                    # Ensure loss is a scalar
+                    if loss.dim() > 0:
+                        loss = loss.mean()
+                    
                 except Exception as e:
                     logger.warning(f"Error in forward pass: {e}")
                     continue
@@ -355,8 +418,14 @@ class SmolVLM2InfiniTrainer:
         
         with torch.no_grad():
             for batch in tqdm(eval_dataloader, desc="Evaluating"):
-                # Move batch to device
-                batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+                # Move batch to device and ensure dtype consistency
+                model_dtype = next(self.model.parameters()).dtype
+                batch = {
+                    k: v.to(device=device, dtype=model_dtype) if torch.is_tensor(v) and v.dtype.is_floating_point 
+                    else v.to(device) if torch.is_tensor(v) 
+                    else v 
+                    for k, v in batch.items()
+                }
                 
                 try:
                     outputs = self.model(**batch)
@@ -429,19 +498,20 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
     
-    # Try to load original SmolVLM2 model
+    # Load model
     try:
-        from transformers import AutoModelForVision2Seq
-        model = AutoModelForVision2Seq.from_pretrained(
+        # First try loading with AutoModel instead of AutoModelForVision2Seq
+        from transformers import AutoModel
+        model = AutoModel.from_pretrained(
             model_args.model_name_or_path,
-            trust_remote_code=model_args.trust_remote_code,
+            trust_remote_code=True,
             torch_dtype=torch.bfloat16 if training_args.bf16 else torch.float32,
         )
         
         # Replace attention layers with infini-attention if requested
         if model_args.use_infini_attention:
             model = replace_attention_with_infini(model, model_args.segment_length)
-            
+    
     except Exception as e:
         logger.warning(f"Could not load SmolVLM2 model: {e}")
         logger.info("Creating new SmolVLM2NanotronModel instead")
@@ -462,7 +532,7 @@ def main():
             tensor_parallel_size=1
         )
         
-        # Create model
+        # Create the model with parallel context
         model = SmolVLM2NanotronModel(config, parallel_context)
     
     # Set trainable parameters

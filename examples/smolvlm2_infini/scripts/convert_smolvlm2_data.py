@@ -56,6 +56,57 @@ def convert_smolvlm2_to_nanotron(input_file: str, output_file: str, processor=No
     
     print(f"Converted {len(converted_data)} samples to {output_file}")
 
+def convert_jsonl_to_nanotron(input_file: str, output_file: str, processor=None):
+    """Convert JSONL dataset format to Nanotron format"""
+    
+    # Load processor if not provided
+    if processor is None:
+        processor = AutoProcessor.from_pretrained(
+            "HuggingFaceTB/SmolVLM2-256M-Instruct",
+            trust_remote_code=True
+        )
+    
+    # Load JSONL file line by line
+    data = []
+    with open(input_file, 'r') as f:
+        for line in f:
+            if line.strip():
+                data.append(json.loads(line))
+    
+    converted_data = []
+    for item in tqdm(data, desc=f"Converting {os.path.basename(input_file)}"):
+        # Format conversation
+        text = ""
+        for turn in item["conversations"]:
+            if turn["from"] == "human":
+                text += f"<|im_start|>user\n{turn['value']}<|im_end|>\n"
+            elif turn["from"] == "gpt":
+                text += f"<|im_start|>assistant\n{turn['value']}<|im_end|>\n"
+        
+        # Tokenize
+        tokens = processor.tokenizer(
+            text,
+            truncation=True,
+            max_length=2048,
+            return_tensors="pt"
+        )
+        
+        converted_item = {
+            "input_ids": tokens["input_ids"].squeeze().tolist(),
+            "text": text,
+            "image_path": item.get("image", ""),
+            "video_path": item.get("video", ""),
+            "id": item.get("id", "unknown")
+        }
+        converted_data.append(converted_item)
+    
+    # Save in Nanotron format
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    with open(output_file, 'w') as f:
+        json.dump(converted_data, f, indent=2)
+    
+    print(f"Converted {len(converted_data)} samples to {output_file}")
+
 def convert_all_datasets(input_dir: str, output_dir: str):
     """Convert all JSON files in input directory to Nanotron format"""
     
@@ -94,8 +145,11 @@ def main():
     args = parser.parse_args()
     
     if args.input and args.output:
-        # Convert single file
-        convert_smolvlm2_to_nanotron(args.input, args.output)
+        # Convert single file based on extension
+        if args.input.endswith('.jsonl'):
+            convert_jsonl_to_nanotron(args.input, args.output)
+        else:
+            convert_smolvlm2_to_nanotron(args.input, args.output)
     else:
         # Convert all files in directory
         convert_all_datasets(args.input_dir, args.output_dir)
