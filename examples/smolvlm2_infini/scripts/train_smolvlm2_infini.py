@@ -241,6 +241,47 @@ class VisionLanguageDataset(Dataset):
             
             return inputs
             
+        except KeyError as e:
+            if str(e) == "'image'":
+                # Handle missing 'image' key - assume text-only sample
+                logger.warning(f"Sample {idx} appears to be text-only (missing 'image' key)")
+                
+                # Get text from the item
+                if 'conversations' in item:
+                    text_parts = []
+                    for conv in item['conversations']:
+                        if conv['from'] == 'human':
+                            text_parts.append(f"User: {conv['value']}")
+                        elif conv['from'] == 'gpt':
+                            text_parts.append(f"Assistant: {conv['value']}")
+                    text = "\n".join(text_parts)
+                else:
+                    text = item.get('text', 'Sample without text')
+                
+                # Remove any image placeholders from text since we don't have images
+                import re
+                text = re.sub(r'<image>', '', text).strip()
+                
+                # Create a dummy image for text-only samples
+                dummy_image = Image.new('RGB', (224, 224), color='white')
+                
+                inputs = self.processor(
+                    images=dummy_image,
+                    text=text if text else "Text-only sample",
+                    return_tensors="pt",
+                    max_length=self.max_length,
+                    truncation=True,
+                    padding="max_length"
+                )
+                
+                # Remove batch dimension
+                for key in inputs:
+                    if inputs[key] is not None:
+                        inputs[key] = inputs[key].squeeze(0)
+                
+                return inputs
+            else:
+                raise
         except Exception as e:
             logger.warning(f"Error loading sample {idx}: {e}")
             # Return a dummy sample in case of error
