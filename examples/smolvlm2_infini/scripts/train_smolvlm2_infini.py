@@ -515,15 +515,43 @@ class SmolVLM2InfiniTrainer:
                 # Forward pass
                 try:
                     outputs = self.model(**batch)
-                    loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
                     
-                    # Debug: print loss shape and type
-                    if step == 0:
-                        logger.info(f"Loss shape: {loss.shape}, Loss type: {type(loss)}")
+                    # CRITICAL DEBUG: Check what we got from the model
+                    has_loss_attr = hasattr(outputs, 'loss')
+                    if step == 0 or (step % 10 == 0):  # Debug every 10 steps
+                        logger.info(f"Step {step}: Model outputs has 'loss' attribute: {has_loss_attr}")
+                        if hasattr(outputs, '__class__'):
+                            logger.info(f"Step {step}: Output type: {outputs.__class__}")
+                        if hasattr(outputs, 'keys') and callable(outputs.keys):
+                            logger.info(f"Step {step}: Output keys: {list(outputs.keys())}")
+                    
+                    # Extract loss with validation
+                    if has_loss_attr and outputs.loss is not None:
+                        loss = outputs.loss
+                        if step == 0 or (step % 10 == 0):
+                            logger.info(f"Step {step}: Using outputs.loss = {loss.item():.6f}")
+                    else:
+                        # FALLBACK - This is likely the problem!
+                        loss = outputs[0] if hasattr(outputs, '__getitem__') else outputs
+                        if step == 0 or (step % 10 == 0):
+                            logger.warning(f"Step {step}: FALLBACK to outputs[0]! Shape: {loss.shape}, Mean: {loss.mean().item():.6f}, Min: {loss.min().item():.6f}, Max: {loss.max().item():.6f}")
+                            logger.warning(f"Step {step}: This is likely NOT a loss value - could be logits!")
                     
                     # Ensure loss is a scalar
                     if loss.dim() > 0:
-                        loss = loss.mean()
+                        original_loss = loss.mean()
+                        if step == 0 or (step % 10 == 0):
+                            logger.info(f"Step {step}: Converted tensor to scalar: {original_loss.item():.6f}")
+                        loss = original_loss
+                    
+                    # CRITICAL: Validate loss is reasonable
+                    loss_value = loss.item()
+                    if loss_value < 0:
+                        logger.error(f"Step {step}: NEGATIVE LOSS DETECTED: {loss_value:.6f}")
+                        logger.error(f"Step {step}: Model class: {self.model.__class__}")
+                        logger.error(f"Step {step}: Batch keys: {list(batch.keys())}")
+                        if 'labels' in batch:
+                            logger.error(f"Step {step}: Labels shape: {batch['labels'].shape}, Labels sample: {batch['labels'][0][:10]}")
                     
                 except Exception as e:
                     logger.warning(f"Error in forward pass: {e}")
@@ -750,37 +778,29 @@ def main():
         logger.warning(f"Could not load processor: {e}")
         processor = None
 
-    # Load model
-    try:
-        from transformers import AutoModel
-        model = AutoModel.from_pretrained(
-            model_args.model_name_or_path,
-            trust_remote_code=True,
-            torch_dtype=torch.bfloat16 if training_args.bf16 else torch.float32,
-        )
+    # Load model - DIRECTLY use SmolVLM2NanotronModel for nanotron training
+    logger.info("Creating SmolVLM2NanotronModel with infini-attention for nanotron training")
+    
+    sys.path.append(os.path.join(os.path.dirname(__file__), "..", "configs"))
+    from smolvlm2_config import SmolVLM2Config
+    config = SmolVLM2Config(
+        use_infini_attention=model_args.use_infini_attention,
+        segment_length=model_args.segment_length,
+    )
 
-        if model_args.use_infini_attention:
-            model = replace_attention_with_infini(model, model_args.segment_length)
-
-    except Exception as e:
-        logger.warning(f"Could not load pretrained model: {e}")
-        logger.info("Creating new SmolVLM2NanotronModel instead")
-
-        sys.path.append(os.path.join(os.path.dirname(__file__), "..", "configs"))
-        from smolvlm2_config import SmolVLM2Config
-        config = SmolVLM2Config(
-            use_infini_attention=model_args.use_infini_attention,
-            segment_length=model_args.segment_length,
-        )
-
-        parallel_context = ParallelContext(
-            data_parallel_size=1,
-            pipeline_parallel_size=1,
-            tensor_parallel_size=1,
-        )
-        from nanotron.parallel.config import ParallelConfig
-        parallel_config = ParallelConfig.from_args(training_args)
-        model = SmolVLM2NanotronModel(config, parallel_context, parallel_config)
+    parallel_context = ParallelContext(
+        data_parallel_size=1,
+        pipeline_parallel_size=1,
+        tensor_parallel_size=1,
+    )
+    from nanotron.parallel.config import ParallelConfig
+    parallel_config = ParallelConfig.from_args(training_args)
+    model = SmolVLM2NanotronModel(config, parallel_context, parallel_config)
+    
+    logger.info(f"Created model: {model.__class__}")
+    logger.info(f"Infini-attention enabled: {model_args.use_infini_attention}")
+    logger.info(f"Segment length: {model_args.segment_length}")
+    logger.info(f"Model has proper loss computation built-in")
 
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()

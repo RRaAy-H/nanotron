@@ -298,11 +298,28 @@ class SmolVLM2NanotronModel(NanotronModel):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1)
-            )
+            # DEBUG: Check label validity
+            valid_labels = (shift_labels != -100).sum().item()
+            total_labels = shift_labels.numel()
+            
+            if valid_labels == 0:
+                print(f"WARNING: All labels are -100 (ignored)! This will cause loss issues.")
+                print(f"Labels shape: {labels.shape}, Valid: {valid_labels}/{total_labels}")
+                loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
+            else:
+                loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                loss = loss_fct(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1)
+                )
+                
+                # DEBUG: Validate loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"INVALID LOSS: {loss.item()} (nan/inf detected)")
+                elif loss.item() < 0:
+                    print(f"NEGATIVE LOSS: {loss.item()}")
+                    print(f"Valid labels: {valid_labels}/{total_labels}")
+                    print(f"Logits range: [{shift_logits.min().item():.3f}, {shift_logits.max().item():.3f}]")
         
         return {
             "logits": logits,
