@@ -108,7 +108,7 @@ python scripts/train_smolvlm2_infini.py \
 ```bash
 # Quick 2-hour validation training
 python scripts/train_smolvlm2_infini.py \
-    --train_data_path ./train_data.json \
+    --train_data_path data/datasets_nanotron/*_nanotron.json \
     --max_steps 1000 \
     --num_train_epochs 0.2 \
     --output_dir checkpoints/smolvlm2_infini_quick
@@ -220,7 +220,7 @@ For rapid validation that the model is trainable within 2 hours:
 # Quick validation training - completes in ~2 hours
 python scripts/train_smolvlm2_infini.py \
     --model_name_or_path HuggingFaceTB/SmolVLM2-256M-Video-Instruct \
-    --train_data_path ./train_data.json \
+    --train_data_path data/datasets_nanotron/*_nanotron.json \
     --output_dir checkpoints/smolvlm2_infini_quick \
     --per_device_train_batch_size 1 \
     --gradient_accumulation_steps 4 \

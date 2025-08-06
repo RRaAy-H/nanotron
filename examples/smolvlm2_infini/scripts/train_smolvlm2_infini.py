@@ -138,8 +138,8 @@ class DataArguments:
         metadata={"help": "Directory containing training images"}
     )
     train_data_path: str = field(
-        default="./train_data.json",
-        metadata={"help": "Path to training data JSON file"}
+        default="data/datasets_nanotron/*_nanotron.json",
+        metadata={"help": "Path to training data JSON files (supports glob patterns for multiple files)"}
     )
     eval_data_path: Optional[str] = field(
         default=None,

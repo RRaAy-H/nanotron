@@ -13,16 +13,11 @@ data_stages:
   - name: "smolvlm2_multimodal_training"
     start_training_step: 1
     data:
-      # SmolVLM2 specific data configuration
-      smolvlm2_data_path: "data/train_data.json"  # Path to SmolVLM2 training data
-      smolvlm2_image_dir: "data/images"  # Directory containing images/videos
-      
-      # Standard nanotron data configuration
       dataset:
         dataset_overwrite_cache: false
         dataset_processing_num_proc_per_process: 1
-        hf_dataset_or_datasets: null  # Use null for custom SmolVLM2 dataset
-        hf_dataset_splits: null
+        hf_dataset_or_datasets: "data/datasets_nanotron/*_nanotron.json"  # Use multiple nanotron files directly
+        hf_dataset_splits: "train"
         text_column_name: "text"
       
       num_loading_workers: 4
@@ -165,6 +160,12 @@ profiler:
   # profile_start_step: 10
   # profile_end_step: 20
 
+# Data Preparation Prerequisites:
+# 1. Run: python scripts/prepare_training_data.py --output_dir data/datasets --base_path /data1/yihao
+# 2. Run: python scripts/convert_smolvlm2_data.py --input_dir data/datasets --output_dir data/datasets_nanotron
+# 3. Ensure media files are accessible at /data1/yihao (images, videos, etc.)
+# Note: Using multiple *_nanotron.json files directly for better distributed training performance
+#
 # Data configuration notes:
 # 1. Effective batch size = micro_batch_size * batch_accumulation_per_replica * dp
 #    With current settings: 2 * 8 * 8 = 128

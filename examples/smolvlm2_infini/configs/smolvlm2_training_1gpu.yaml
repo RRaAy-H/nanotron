@@ -12,13 +12,11 @@ data_stages:
   - name: "smolvlm2_multimodal_training"
     start_training_step: 1
     data:
-      smolvlm2_data_path: "data/train_data.json"
-      smolvlm2_image_dir: "data/images"
       dataset:
         dataset_overwrite_cache: false
         dataset_processing_num_proc_per_process: 1
-        hf_dataset_or_datasets: null
-        hf_dataset_splits: null
+        hf_dataset_or_datasets: "data/datasets_nanotron/*_nanotron.json"
+        hf_dataset_splits: "train"
         text_column_name: "text"
       num_loading_workers: 2  # Reduced for single GPU
       seed: 42

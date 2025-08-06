@@ -20,7 +20,7 @@
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--max_seq_length` | 2048 | Maximum token sequence length |
-| `--train_data_path` | "./train_data.json" | Path to training data JSON file (typically points to `*_nanotron.json` files) |
+| `--train_data_path` | "data/datasets_nanotron/*_nanotron.json" | Path to training data JSON files (uses glob pattern for multiple nanotron files) |
 | `--eval_data_path` | None | Path to evaluation data JSON file for validation during training |
 | `--image_dir` | "./images" | Base directory for images (NOT USED in actual pipeline - paths are absolute) |
 
@@ -70,7 +70,7 @@ python train_smolvlm2_infini.py \
     --model_name_or_path "HuggingFaceTB/SmolVLM2-1.7B-Instruct" \
     --data_mixture "configs/data_mixture.yaml" \
     --output_dir "./output" \
-    --train_data_path "data/datasets_nanotron/merged_nanotron.json" \
+    --train_data_path "data/datasets_nanotron/*_nanotron.json" \
     --per_device_train_batch_size 4 \
     --bf16 True \
     --do_train
@@ -82,7 +82,7 @@ python train_smolvlm2_infini.py \
     --model_name_or_path "HuggingFaceTB/SmolVLM2-1.7B-Instruct" \
     --data_mixture "configs/data_mixture.yaml" \
     --output_dir "./output" \
-    --train_data_path "data/datasets_nanotron/train_nanotron.json" \
+    --train_data_path "data/datasets_nanotron/*_nanotron.json" \
     --eval_data_path "data/datasets_nanotron/eval_nanotron.json" \
     --per_device_train_batch_size 4 \
     --max_steps 1000 \
@@ -100,7 +100,7 @@ python train_smolvlm2_infini.py \
     --model_name_or_path "HuggingFaceTB/SmolVLM2-1.7B-Instruct" \
     --data_mixture "configs/data_mixture.yaml" \
     --output_dir "./checkpoints" \
-    --train_data_path "data/datasets_nanotron/train_nanotron.json" \
+    --train_data_path "data/datasets_nanotron/*_nanotron.json" \
     --eval_data_path "data/datasets_nanotron/eval_nanotron.json" \
     --use_infini_attention True \
     --segment_length 512 \

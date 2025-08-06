@@ -197,45 +197,45 @@ def check_data_setup(config_path: str) -> Dict[str, bool]:
     try:
         config = Config.from_yaml(config_path)
         
-        # Check if using SmolVLM2 data format
+        # Check if using nanotron data format  
         data_stage = config.data_stages[0]
-        if hasattr(data_stage.data, 'smolvlm2_data_path'):
-            data_path = data_stage.data.smolvlm2_data_path
-            image_dir = getattr(data_stage.data, 'smolvlm2_image_dir', './images')
+        if isinstance(data_stage.data.dataset, PretrainDatasetsArgs):
+            data_path = data_stage.data.dataset.hf_dataset_or_datasets
+            image_base_path = "/data1/yihao"  # Base path for media files
             
-            # Check data file
+            # Check nanotron data file
             if Path(data_path).exists():
                 results['data_file_exists'] = True
-                print(f"  ✓ Data file exists: {data_path}")
+                print(f"  ✓ Nanotron data file exists: {data_path}")
                 
-                # Try to load and validate format
+                # Try to load and validate nanotron format
                 try:
                     with open(data_path, 'r') as f:
                         data = json.load(f)
                     
                     if isinstance(data, list) and len(data) > 0:
                         results['data_format_valid'] = True
-                        print(f"  ✓ Data format valid: {len(data)} samples")
+                        print(f"  ✓ Nanotron data format valid: {len(data)} samples")
                         
-                        # Check a few samples
+                        # Check nanotron format structure
                         sample = data[0]
-                        has_conversations = 'conversations' in sample
+                        has_input_ids = 'input_ids' in sample
                         has_text = 'text' in sample
-                        has_image = 'image' in sample or 'video' in sample
+                        has_paths = 'image_path' in sample or 'video_path' in sample
                         
-                        if has_conversations or has_text:
+                        if has_input_ids and has_text:
                             results['text_format_valid'] = True
-                            print("  ✓ Text format valid")
+                            print("  ✓ Nanotron text format valid (tokenized)")
                         else:
                             results['text_format_valid'] = False
-                            print("  ✗ Invalid text format")
+                            print("  ✗ Invalid nanotron format (missing input_ids or text)")
                         
-                        if has_image:
+                        if has_paths:
                             results['image_format_valid'] = True
-                            print("  ✓ Image references found")
+                            print("  ✓ Media path references found")
                         else:
                             results['image_format_valid'] = False
-                            print("  ⚠ No image references found")
+                            print("  ⚠ No media path references found")
                             
                     else:
                         results['data_format_valid'] = False
@@ -243,19 +243,19 @@ def check_data_setup(config_path: str) -> Dict[str, bool]:
                         
                 except Exception as e:
                     results['data_format_valid'] = False
-                    print(f"  ✗ Failed to parse data file: {e}")
+                    print(f"  ✗ Failed to parse nanotron data file: {e}")
             else:
                 results['data_file_exists'] = False
-                print(f"  ✗ Data file not found: {data_path}")
+                print(f"  ✗ Nanotron data file not found: {data_path}")
             
-            # Check image directory
-            if Path(image_dir).exists():
+            # Check media base directory
+            if Path(image_base_path).exists():
                 results['image_dir_exists'] = True
-                image_count = len(list(Path(image_dir).rglob('*.*')))
-                print(f"  ✓ Image directory exists: {image_dir} ({image_count} files)")
+                media_count = len(list(Path(image_base_path).rglob('*')))
+                print(f"  ✓ Media base directory exists: {image_base_path} ({media_count} files/dirs)")
             else:
                 results['image_dir_exists'] = False
-                print(f"  ✗ Image directory not found: {image_dir}")
+                print(f"  ✗ Media base directory not found: {image_base_path}")
                 
         else:
             # Standard dataset format

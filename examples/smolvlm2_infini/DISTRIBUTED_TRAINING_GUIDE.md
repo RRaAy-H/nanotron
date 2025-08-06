@@ -90,37 +90,70 @@ data_stages:
   - name: "smolvlm2_multimodal_training"
     start_training_step: 1
     data:
-      smolvlm2_data_path: "data/train_data.json"  # Your training data
-      smolvlm2_image_dir: "data/images"           # Image directory
+      dataset:
+        dataset_overwrite_cache: false
+        dataset_processing_num_proc_per_process: 1
+        hf_dataset_or_datasets: "data/datasets_nanotron/*_nanotron.json"  # Use multiple nanotron files directly for better distribution
+        hf_dataset_splits: "train"
+        text_column_name: "text"
 ```
 
 ## 📁 Data Format
 
 ### Expected Data Structure
+
+**After Data Preparation:**
 ```
 data/
-├── train_data.json          # Training data file
-├── images/                  # Image directory
-│   ├── image1.jpg
-│   ├── image2.jpg
-│   └── videos/              # Video files (optional)
-│       ├── video1.mp4
-│       └── video2.mp4
+├── datasets_nanotron/       # Processed training data (nanotron format)
+│   ├── dataset1_nanotron.json  # Converted dataset files (used directly)
+│   ├── dataset2_nanotron.json  # Converted dataset files (used directly)
+│   └── *_nanotron.json         # Multiple sharded nanotron files for efficient distributed loading
+└── datasets/                   # Raw datasets (before conversion)
+    ├── *.json                  # Raw dataset files
+    └── smolvlm2_256m_mixture.yaml  # Dataset mixture configuration
 ```
 
-### Data File Format
+**Media Files Location:**
+```
+/data1/yihao/                # Base path for all media files
+├── LLaVA-OneVision-Data/    # Image/text datasets (parquet format)
+├── M4-Instruct-Data/        # Multi-image datasets (ZIP format)  
+├── MammoTH-VL_Instruct-12M/ # Multi-image datasets (TAR.GZ)
+├── VISTA-400K/              # Video datasets (TAR)
+├── ShareGPTVideo/           # Video datasets
+└── ...                     # Other dataset directories
+```
+
+### Data Preparation Workflow
+
+1. **Download and prepare datasets:**
+   ```bash
+   python scripts/prepare_training_data.py \
+       --output_dir data/datasets \
+       --base_path /data1/yihao \
+       --seed 42
+   ```
+
+2. **Convert to nanotron format:**
+   ```bash
+   python scripts/convert_smolvlm2_data.py \
+       --input_dir data/datasets \
+       --output_dir data/datasets_nanotron
+   ```
+
+   **Note:** The multiple `*_nanotron.json` files are used directly by nanotron for optimal distributed training performance. No need to merge them into a single file.
+
+### Nanotron Data Format
+The converted `*_nanotron.json` files contain:
 ```json
 [
   {
-    "conversations": [
-      {"from": "human", "value": "What do you see in this image?"},
-      {"from": "gpt", "value": "I see a beautiful landscape with mountains."}
-    ],
-    "image": "image1.jpg"
-  },
-  {
-    "text": "Direct text format is also supported.",
-    "image": "image2.jpg" 
+    "input_ids": [128000, 9906, 1917, ...],  # Tokenized text
+    "text": "<|im_start|>user\nWhat do you see?<|im_end|>\n<|im_start|>assistant\nI see...<|im_end|>",
+    "image_path": "LLaVA-OneVision-Data/images/image1.jpg",  # Relative to /data1/yihao
+    "video_path": "",
+    "id": "sample_001"
   }
 ]
 ```

@@ -259,40 +259,8 @@ def get_smolvlm2_dataloader_from_data_stage(trainer: SmolVLM2DistributedTrainer,
     
     input_pp_rank, output_pp_rank = get_input_output_pp_ranks(model=trainer.model)
     
-    # Check if we have SmolVLM2 specific data configuration
-    if hasattr(data, 'smolvlm2_data_path'):
-        log_rank("Using SmolVLM2 vision-language dataset", logger=logger, level=logging.INFO, rank=0)
-        
-        # Load SmolVLM2 dataset
-        with main_rank_first(trainer.parallel_context.world_pg):
-            dataset = SmolVLM2VisionLanguageDataset(
-                data_path=data.smolvlm2_data_path,
-                image_dir=getattr(data, 'smolvlm2_image_dir', './images'),
-                processor=trainer.processor,
-                max_length=trainer.sequence_length
-            )
-            
-            # Create distributed sampler
-            from torch.utils.data.distributed import DistributedSampler
-            sampler = DistributedSampler(
-                dataset,
-                num_replicas=trainer.parallel_context.dp_pg.size(),
-                rank=trainer.parallel_context.dp_pg.rank(),
-                shuffle=True,
-                seed=data.seed
-            )
-            
-            # Create dataloader
-            dataloader = DataLoader(
-                dataset,
-                batch_size=trainer.micro_batch_size,
-                sampler=sampler,
-                num_workers=getattr(data, 'num_loading_workers', 4),
-                pin_memory=True,
-                drop_last=True
-            )
-            
-    elif data.dataset is None:
+    # SmolVLM2 data is processed into standard nanotron format, so use standard dataloaders
+    if data.dataset is None:
         # Dummy data generator fallback
         log_rank("Using dummy data generator", logger=logger, level=logging.INFO, rank=0)
         dataloader = dummy_infinite_data_generator(
