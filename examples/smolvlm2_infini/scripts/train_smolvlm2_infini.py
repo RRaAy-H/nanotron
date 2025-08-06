@@ -73,8 +73,9 @@ class TensorBoardArguments:
 @dataclass
 class ModelArguments:
     """Arguments pertaining to which model/config/tokenizer we are going to fine-tune."""
-    model_name_or_path: str = field(
-        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    model_name_or_path: Optional[str] = field(
+        default="HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
+        metadata={"help": "Path to pretrained model or model identifier (used only for processor loading)"}
     )
     trust_remote_code: bool = field(
         default=True,
@@ -788,14 +789,15 @@ def main():
         segment_length=model_args.segment_length,
     )
 
+    # Create parallel context for single GPU training
     parallel_context = ParallelContext(
         data_parallel_size=1,
         pipeline_parallel_size=1,
         tensor_parallel_size=1,
     )
-    from nanotron.parallel.config import ParallelConfig
-    parallel_config = ParallelConfig.from_args(training_args)
-    model = SmolVLM2NanotronModel(config, parallel_context, parallel_config)
+    
+    # SmolVLM2NanotronModel only takes 2 parameters: config and parallel_context
+    model = SmolVLM2NanotronModel(config, parallel_context)
     
     logger.info(f"Created model: {model.__class__}")
     logger.info(f"Infini-attention enabled: {model_args.use_infini_attention}")
