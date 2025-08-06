@@ -1,0 +1,192 @@
+# SmolVLM2-Infini Distributed Training Configuration
+# This config supports multi-GPU training with nanotron's 3D parallelism
+
+checkpoints:
+  checkpoints_path: checkpoints/smolvlm2_infini_distributed
+  checkpoint_interval: 500  # Save every 500 steps
+  resume_checkpoint_path: null  # Set to checkpoint path to resume training
+  save_initial_state: true
+  checkpoints_path_is_shared_file_system: false  # Set true for multi-node shared storage
+
+# Training data stages
+data_stages:
+  - name: "smolvlm2_multimodal_training"
+    start_training_step: 1
+    data:
+      # SmolVLM2 specific data configuration
+      smolvlm2_data_path: "data/train_data.json"  # Path to SmolVLM2 training data
+      smolvlm2_image_dir: "data/images"  # Directory containing images/videos
+      
+      # Standard nanotron data configuration
+      dataset:
+        dataset_overwrite_cache: false
+        dataset_processing_num_proc_per_process: 1
+        hf_dataset_or_datasets: null  # Use null for custom SmolVLM2 dataset
+        hf_dataset_splits: null
+        text_column_name: "text"
+      
+      num_loading_workers: 4
+      seed: 42
+
+# General configuration
+general:
+  project: "smolvlm2_infini_distributed"
+  run: "smolvlm2_multiGPU_training"
+  seed: 42
+  
+# Logging configuration
+logging:
+  iteration_step_info_interval: 10
+  log_level: "info"
+  log_level_replica: "info"
+
+# Model configuration
+model:
+  dtype: bfloat16
+  make_vocab_size_divisible_by: 1
+  ddp_bucket_cap_mb: 25  # Adjust based on memory constraints
+  
+  model_config:
+    # SmolVLM2 architecture config
+    vocab_size: 49152
+    hidden_size: 512
+    intermediate_size: 1536
+    num_hidden_layers: 12
+    num_attention_heads: 8
+    num_key_value_heads: 4
+    max_position_embeddings: 16384
+    rope_theta: 10000.0
+    rms_norm_eps: 1e-5
+    
+    # Infini-attention specific config
+    use_infini_attention: true
+    segment_length: 512  # Segment length for infini-attention
+    
+    # Vision specific config
+    image_token_id: 32000
+    
+    # Model initialization
+    init_method:
+      std: 0.02
+
+# Optimizer configuration
+optimizer:
+  accumulate_grad_in_fp32: true
+  clip_grad: 1.0
+  torch_adam_is_fused: true
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  weight_decay: 0.01
+  zero_stage: 0  # Can use 1 for memory optimization
+  
+  learning_rate_scheduler:
+    learning_rate: 3.0e-4
+    lr_decay_steps: 10000
+    lr_decay_style: cosine
+    lr_warmup_steps: 1000
+    lr_warmup_style: linear
+    min_decay_lr: 1.0e-5
+
+# ===== CRITICAL: Parallelism Configuration =====
+# This is where you configure multi-GPU setup
+parallelism:
+  # Data Parallel: Number of replicas across different data chunks
+  # Set this to the number of GPUs you want to use for data parallelism
+  dp: 8  # Use 8 GPUs for data parallelism
+  
+  # Pipeline Parallel: Number of pipeline stages (model layers split across GPUs)
+  # Usually 1 unless you have very large models that don't fit on single GPU
+  pp: 1
+  
+  # Tensor Parallel: Number of GPUs per model layer (intra-layer parallelism)
+  # Usually 1 unless you have very large layers that don't fit on single GPU
+  tp: 1
+  
+  # Expert Parallel: For MoE models (not used in SmolVLM2)
+  expert_parallel_size: 1
+  
+  # Pipeline engine configuration
+  pp_engine: "1f1b"  # Options: "1f1b" or "afab"
+  
+  # Tensor parallel configuration
+  tp_mode: "ALL_REDUCE"  # Options: "ALL_REDUCE" or "REDUCE_SCATTER"
+  tp_linear_async_communication: false
+
+# Tokenizer configuration
+tokenizer:
+  tokenizer_name_or_path: "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"
+
+# Training configuration
+tokens:
+  # Batch configuration
+  batch_accumulation_per_replica: 8  # Gradient accumulation steps
+  micro_batch_size: 2  # Batch size per GPU
+  
+  # Sequence configuration
+  sequence_length: 2048  # Maximum sequence length
+  
+  # Training steps
+  train_steps: 10000  # Total training steps
+  val_check_interval: 500  # Validation every N steps
+
+# Experiment logging
+experiment_logger:
+  tensorboard_logger:
+    flush_secs: 30
+    tensorboard_dir: "./tensorboard_logs"
+  
+  wandb_logger:
+    wandb_entity: null  # Set your W&B entity
+    wandb_project: "smolvlm2_infini_distributed"
+
+# Infini-attention specific configuration
+infini_attention:
+  segment_length: 512
+  turn_on_memory: true
+  balance_factor_lr: 0.0003  # Learning rate for balance factors
+  balance_act_type: "orig_sigmoid"  # Activation function for balance factors
+  balance_init_type: "zeros"  # Initialization for balance factors
+  logging: true
+  logging_interval: 100
+  log_grad: false
+  log_segment_acts: false
+
+# Fault tolerance and checkpointing
+fault_tolerance:
+  max_checkpoints_to_keep: 3
+  auto_resume: true
+  save_on_interrupt: true
+
+# Profiling configuration (optional)
+profiler:
+  # Uncomment to enable profiling
+  # export_chrome_trace: true
+  # profile_start_step: 10
+  # profile_end_step: 20
+
+# Data configuration notes:
+# 1. Effective batch size = micro_batch_size * batch_accumulation_per_replica * dp
+#    With current settings: 2 * 8 * 8 = 128
+# 2. Adjust micro_batch_size based on GPU memory
+# 3. Adjust dp based on number of available GPUs
+# 4. For single node with 8 GPUs, use: dp=8, tp=1, pp=1
+# 5. For multi-node, increase dp proportionally
+
+# GPU Memory Guidelines:
+# - RTX 3090/4090 (24GB): micro_batch_size=1-2
+# - A100 40GB: micro_batch_size=2-4
+# - A100 80GB: micro_batch_size=4-8
+# - H100 80GB: micro_batch_size=4-8
+
+# Common configurations:
+# Single Node Configurations:
+# - 4 GPUs: dp=4, tp=1, pp=1
+# - 8 GPUs: dp=8, tp=1, pp=1
+# 
+# Multi-Node Configurations (2 nodes, 8 GPUs each):
+# - dp=16, tp=1, pp=1
+#
+# Large Model Configurations (if model doesn't fit on single GPU):
+# - 8 GPUs with TP: dp=4, tp=2, pp=1
+# - 8 GPUs with PP: dp=4, tp=1, pp=2

@@ -1,0 +1,115 @@
+# SmolVLM2-Infini 2-GPU Training Configuration
+# Optimized for single node with 2 GPUs
+
+checkpoints:
+  checkpoints_path: checkpoints/smolvlm2_infini_2gpu
+  checkpoint_interval: 500
+  resume_checkpoint_path: null
+  save_initial_state: true
+  checkpoints_path_is_shared_file_system: false
+
+data_stages:
+  - name: "smolvlm2_multimodal_training"
+    start_training_step: 1
+    data:
+      smolvlm2_data_path: "data/train_data.json"
+      smolvlm2_image_dir: "data/images"
+      dataset:
+        dataset_overwrite_cache: false
+        dataset_processing_num_proc_per_process: 1
+        hf_dataset_or_datasets: null
+        hf_dataset_splits: null
+        text_column_name: "text"
+      num_loading_workers: 4
+      seed: 42
+
+general:
+  project: "smolvlm2_infini_2gpu"
+  run: "smolvlm2_2gpu_training"
+  seed: 42
+
+logging:
+  iteration_step_info_interval: 10
+  log_level: "info"
+  log_level_replica: "info"
+
+model:
+  dtype: bfloat16
+  make_vocab_size_divisible_by: 1
+  ddp_bucket_cap_mb: 25
+  model_config:
+    vocab_size: 49152
+    hidden_size: 512
+    intermediate_size: 1536
+    num_hidden_layers: 12
+    num_attention_heads: 8
+    num_key_value_heads: 4
+    max_position_embeddings: 16384
+    rope_theta: 10000.0
+    rms_norm_eps: 1e-5
+    use_infini_attention: true
+    segment_length: 512
+    image_token_id: 32000
+    init_method:
+      std: 0.02
+
+optimizer:
+  accumulate_grad_in_fp32: true
+  clip_grad: 1.0
+  torch_adam_is_fused: true
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  weight_decay: 0.01
+  zero_stage: 0
+  learning_rate_scheduler:
+    learning_rate: 3.0e-4
+    lr_decay_steps: 10000
+    lr_decay_style: cosine
+    lr_warmup_steps: 1000
+    lr_warmup_style: linear
+    min_decay_lr: 1.0e-5
+
+# 2-GPU Configuration
+parallelism:
+  dp: 2    # 2 GPUs for data parallelism
+  pp: 1    # No pipeline parallelism
+  tp: 1    # No tensor parallelism
+  expert_parallel_size: 1
+  pp_engine: "1f1b"
+  tp_mode: "ALL_REDUCE"
+  tp_linear_async_communication: false
+
+tokenizer:
+  tokenizer_name_or_path: "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"
+
+tokens:
+  batch_accumulation_per_replica: 16  # Effective batch size: 2*16*2 = 64
+  micro_batch_size: 2
+  sequence_length: 2048
+  train_steps: 10000
+  val_check_interval: 500
+
+experiment_logger:
+  tensorboard_logger:
+    flush_secs: 30
+    tensorboard_dir: "./tensorboard_logs"
+  wandb_logger:
+    wandb_entity: null
+    wandb_project: "smolvlm2_infini_2gpu"
+
+infini_attention:
+  segment_length: 512
+  turn_on_memory: true
+  balance_factor_lr: 0.0003
+  balance_act_type: "orig_sigmoid"
+  balance_init_type: "zeros"
+  logging: true
+  logging_interval: 100
+  log_grad: false
+  log_segment_acts: false
+
+fault_tolerance:
+  max_checkpoints_to_keep: 3
+  auto_resume: true
+  save_on_interrupt: true

@@ -5,7 +5,7 @@ import sys
 import os
 import torch
 import torch.nn as nn
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass, field
 from transformers import (
     HfArgumentParser,
@@ -23,6 +23,18 @@ from PIL import Image
 import logging
 import cv2
 import torch.distributed as dist
+import signal
+import glob
+import shutil
+import numpy as np
+import random
+from pathlib import Path
+from datetime import datetime
+import hashlib
+import threading
+import time
+from collections import defaultdict
+from typing import Any, Union
 try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
@@ -34,6 +46,9 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "..", "src")
 from nanotron.models.smolvlm2_nanotron import SmolVLM2NanotronModel
 from nanotron.models.llama import LlamaDecoderLayer
 from nanotron.parallel.context import ParallelContext
+from nanotron.serialize import save, load
+from nanotron.serialize.metadata import CheckpointMetadata
+from nanotron.random import RandomStates, get_current_random_states, set_random_states
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,6 +101,26 @@ class ModelArguments:
     segment_length: int = field(
         default=512,
         metadata={"help": "Segment length for infini-attention"}
+    )
+    resume_from_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to a checkpoint folder to resume training from"}
+    )
+    max_checkpoints_to_keep: int = field(
+        default=3,
+        metadata={"help": "Maximum number of checkpoints to keep (older ones will be deleted)"}
+    )
+    use_nanotron_checkpointing: bool = field(
+        default=False,
+        metadata={"help": "Use Nanotron's native serialization system for distributed training"}
+    )
+    enable_checkpoint_validation: bool = field(
+        default=True,
+        metadata={"help": "Enable checkpoint integrity validation"}
+    )
+    incremental_checkpoint_interval: int = field(
+        default=10,
+        metadata={"help": "Save full checkpoints every N saves, incremental otherwise"}
     )
 
 @dataclass
@@ -274,7 +309,11 @@ class VisionLanguageDataset(Dataset):
         except KeyError as e:
             if str(e) == "'image'":
                 # Handle missing 'image' key - assume text-only sample
-                logger.warning(f"Sample {idx} appears to be text-only (missing 'image' key)")
+                # Reduce logging noise - only log every 1000th text-only sample
+                if idx % 1000 == 0:
+                    logger.info(f"Processing text-only samples (e.g., sample {idx})")
+                elif idx < 10:  # Log first few for debugging
+                    logger.warning(f"Sample {idx} appears to be text-only (missing 'image' key)")
                 
                 # Get text from the item
                 if 'conversations' in item:
@@ -365,6 +404,228 @@ class SmolVLM2InfiniTrainer:
         
         # Setup optimizer and scheduler
         self.setup_optimizer()
+        
+        # Initialize training metrics tracking
+        self.training_metrics = {
+            'train_loss_history': [],
+            'eval_loss_history': [],
+            'learning_rates': [],
+            'gradient_norms': [],
+            'step_times': [],
+            'checkpoint_history': []
+        }
+        
+        # For incremental checkpointing
+        self.previous_model_state = None
+        self.checkpoint_validation_enabled = getattr(model_args, 'enable_checkpoint_validation', True)
+        self.use_nanotron_checkpointing = getattr(model_args, 'use_nanotron_checkpointing', False)
+        self.incremental_checkpoint_interval = getattr(model_args, 'incremental_checkpoint_interval', 10)
+        
+        # Initialize distributed coordination
+        self.is_distributed = dist.is_initialized()
+        self.local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        self.world_size = int(os.environ.get('WORLD_SIZE', 1))
+        self.is_main_process = (not self.is_distributed) or (dist.get_rank() == 0)
+    
+    def _setup_signal_handlers(self):
+        """Setup handlers for graceful interruption"""
+        def signal_handler(signum, frame):
+            logger.info(f"Received signal {signum}. Initiating graceful shutdown...")
+            self.interrupted = True
+        
+        # Register handlers for common interruption signals
+        signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+        signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+        logger.info("Signal handlers registered for graceful interruption")
+    
+    def _calculate_file_checksum(self, file_path: str) -> str:
+        """Calculate SHA256 checksum of a file"""
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(chunk)
+        return sha256_hash.hexdigest()
+    
+    def _validate_checkpoint_integrity(self, checkpoint_dir: str) -> bool:
+        """Validate checkpoint integrity using checksums and test loading"""
+        if not self.checkpoint_validation_enabled:
+            return True
+            
+        try:
+            # Check required files exist
+            required_files = ["training_state.pt", "pytorch_model.bin"]
+            for file_name in required_files:
+                file_path = os.path.join(checkpoint_dir, file_name)
+                if not os.path.exists(file_path):
+                    logger.error(f"Missing checkpoint file: {file_name}")
+                    return False
+            
+            # Validate training_state.pt by attempting to load it
+            checkpoint_path = os.path.join(checkpoint_dir, "training_state.pt")
+            try:
+                checkpoint_data = torch.load(checkpoint_path, map_location='cpu')
+                
+                # Check required keys
+                required_keys = ['model_state_dict', 'optimizer_state_dict', 
+                               'scheduler_state_dict', 'global_step']
+                for key in required_keys:
+                    if key not in checkpoint_data:
+                        logger.error(f"Missing key in checkpoint: {key}")
+                        return False
+                        
+                # Validate global_step is reasonable
+                global_step = checkpoint_data.get('global_step', -1)
+                if global_step < 0:
+                    logger.error(f"Invalid global_step: {global_step}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Failed to load checkpoint for validation: {e}")
+                return False
+            
+            # Calculate and store checksums
+            checksums = {}
+            for file_name in required_files:
+                file_path = os.path.join(checkpoint_dir, file_name)
+                checksums[file_name] = self._calculate_file_checksum(file_path)
+            
+            # Save validation metadata
+            validation_data = {
+                'validation_timestamp': datetime.now().isoformat(),
+                'file_checksums': checksums,
+                'file_sizes': {
+                    file_name: os.path.getsize(os.path.join(checkpoint_dir, file_name))
+                    for file_name in required_files
+                },
+                'validation_passed': True,
+                'global_step': global_step
+            }
+            
+            validation_path = os.path.join(checkpoint_dir, "checkpoint_validation.json")
+            with open(validation_path, "w") as f:
+                json.dump(validation_data, f, indent=2)
+                
+            logger.info(f"Checkpoint validation passed: {checkpoint_dir}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Checkpoint validation failed: {e}")
+            return False
+    
+    def _save_training_metrics(self, output_dir: str, global_step: int, 
+                              step_loss: float = None, eval_loss: float = None):
+        """Save comprehensive training metrics with the checkpoint"""
+        metrics_data = {
+            'global_step': global_step,
+            'timestamp': datetime.now().isoformat(),
+            'training_metrics': dict(self.training_metrics),
+            'current_step_loss': step_loss,
+            'current_eval_loss': eval_loss,
+            'model_info': {
+                'num_parameters': sum(p.numel() for p in self.model.parameters()),
+                'num_trainable_parameters': sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            }
+        }
+        
+        # Add optimizer state info
+        if hasattr(self.optimizer, 'state_dict'):
+            optimizer_info = {}
+            state_dict = self.optimizer.state_dict()
+            if 'param_groups' in state_dict:
+                optimizer_info['learning_rates'] = [group.get('lr', 0.0) for group in state_dict['param_groups']]
+                optimizer_info['weight_decays'] = [group.get('weight_decay', 0.0) for group in state_dict['param_groups']]
+            metrics_data['optimizer_info'] = optimizer_info
+        
+        # Add scheduler info
+        if hasattr(self.scheduler, 'get_last_lr'):
+            metrics_data['scheduler_info'] = {
+                'last_lr': self.scheduler.get_last_lr(),
+                'state_dict': self.scheduler.state_dict()
+            }
+        
+        metrics_path = os.path.join(output_dir, "training_metrics.json")
+        with open(metrics_path, "w") as f:
+            json.dump(metrics_data, f, indent=2)
+        
+        logger.debug(f"Training metrics saved to {metrics_path}")
+    
+    def _coordinate_distributed_checkpoint(self, operation: str):
+        """Coordinate checkpoint operations across distributed processes"""
+        if not self.is_distributed:
+            return True
+            
+        try:
+            # Only rank 0 performs actual checkpoint operations
+            if operation == "save":
+                if self.is_main_process:
+                    # Main process performs save
+                    result = True
+                else:
+                    # Other processes wait
+                    result = False
+                
+                # Synchronize all processes
+                dist.barrier()
+                return result
+                
+            elif operation == "load":
+                # All processes can load, but coordinate
+                dist.barrier()  # Ensure checkpoint is fully saved
+                return True
+                
+        except Exception as e:
+            logger.error(f"Distributed coordination failed: {e}")
+            return False
+            
+        return True
+    
+    def _save_with_nanotron(self, output_dir: str, global_step: int):
+        """Save checkpoint using Nanotron's native serialization"""
+        try:
+            from nanotron.config import Config
+            from nanotron.parallel.context import ParallelContext
+            
+            # Create minimal parallel context for single GPU
+            if not hasattr(self, 'parallel_context'):
+                self.parallel_context = ParallelContext(
+                    tensor_parallel_size=1,
+                    pipeline_parallel_size=1,
+                    data_parallel_size=self.world_size,
+                )
+            
+            # Create minimal config for nanotron
+            # Note: In production, this should be passed from main training config
+            minimal_config = {
+                'checkpoints': {
+                    'checkpoints_path': output_dir,
+                    'checkpoint_interval': self.args.save_steps,
+                }
+            }
+            
+            # Use nanotron's save function
+            checkpoint_metadata = {
+                'global_step': global_step,
+                'timestamp': datetime.now().isoformat(),
+                'training_metrics': self.training_metrics
+            }
+            
+            save(
+                config=minimal_config,
+                model=self.model,
+                optimizer=self.optimizer,
+                lr_scheduler=self.scheduler,
+                parallel_context=self.parallel_context,
+                root_folder=Path(output_dir),
+                checkpoint_metadata=checkpoint_metadata
+            )
+            
+            logger.info(f"Nanotron checkpoint saved to {output_dir}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to save with Nanotron serialization: {e}")
+            logger.info("Falling back to custom checkpoint saving")
+            return False
     
     def setup_tensorboard(self):
         """Initialize TensorBoard logging"""
@@ -429,8 +690,11 @@ class SmolVLM2InfiniTrainer:
         )
     
     def train(self):
-        """Main training loop"""
+        """Main training loop with checkpoint resumption support"""
         logger.info("Starting training...")
+        
+        # Setup signal handlers for graceful interruption
+        self._setup_signal_handlers()
         
         # Move model to device and ensure proper dtype
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -449,9 +713,35 @@ class SmolVLM2InfiniTrainer:
             pin_memory=True
         )
         
-        # Training state
+        # Check for checkpoint resumption
         global_step = 0
         total_loss = 0.0
+        start_epoch = 0
+        
+        # Try to resume from checkpoint
+        checkpoint_to_resume = None
+        if hasattr(self.model_args, 'resume_from_checkpoint') and self.model_args.resume_from_checkpoint:
+            checkpoint_to_resume = self.model_args.resume_from_checkpoint
+        elif self.args.resume_from_checkpoint:
+            # Check for auto-resume from latest checkpoint
+            checkpoint_to_resume = self.find_latest_checkpoint()
+            if checkpoint_to_resume:
+                logger.info(f"Found latest checkpoint: {checkpoint_to_resume}")
+        
+        if checkpoint_to_resume and os.path.exists(checkpoint_to_resume):
+            try:
+                global_step = self.load_checkpoint(checkpoint_to_resume)
+                # Calculate which epoch to start from
+                steps_per_epoch = len(train_dataloader)
+                start_epoch = global_step // steps_per_epoch
+                # Skip already processed batches in the first resumed epoch
+                batches_to_skip = global_step % steps_per_epoch
+                logger.info(f"Resuming from epoch {start_epoch}, step {global_step}")
+                if batches_to_skip > 0:
+                    logger.info(f"Skipping {batches_to_skip} batches in current epoch")
+            except Exception as e:
+                logger.error(f"Failed to load checkpoint: {e}")
+                logger.info("Starting training from scratch")
         
         # Calculate total steps based on max_steps or num_train_epochs
         steps_per_epoch = len(train_dataloader)
@@ -466,14 +756,40 @@ class SmolVLM2InfiniTrainer:
         
         logger.info(f"Total training steps: {total_steps}")
         
+        # Store for signal handler
+        self.global_step = global_step
+        self.interrupted = False
+        
         # Training loop
-        for epoch in range(effective_epochs):
+        for epoch in range(start_epoch, effective_epochs):
+            if self.interrupted:
+                logger.info("Training interrupted by signal")
+                break
+                
             logger.info(f"Starting epoch {epoch + 1}/{effective_epochs}")
+            self.current_epoch = epoch
             
             epoch_loss = 0.0
             progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}")
             
+            # Skip batches if resuming within an epoch
+            batches_to_skip = 0
+            if epoch == start_epoch and global_step > 0:
+                steps_per_epoch = len(train_dataloader)
+                batches_to_skip = global_step % steps_per_epoch
+            
             for step, batch in enumerate(progress_bar):
+                # Skip batches if resuming
+                if step < batches_to_skip:
+                    continue
+                    
+                # Check for interruption
+                if self.interrupted:
+                    logger.info("Saving checkpoint before interruption...")
+                    checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-interrupted-{global_step}")
+                    self.save_checkpoint(checkpoint_dir, global_step, step_loss)
+                    break
+                
                 # Check if we've reached max_steps
                 if hasattr(self.args, 'max_steps') and self.args.max_steps > 0 and global_step >= self.args.max_steps:
                     logger.info(f"Reached max_steps ({self.args.max_steps}). Stopping training.")
@@ -508,9 +824,18 @@ class SmolVLM2InfiniTrainer:
                 # Backward pass
                 loss.backward()
                 
-                # Gradient clipping
+                # Calculate gradient norm for metrics
+                grad_norm = 0.0
                 if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0:
-                    clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+                    grad_norm = clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+                else:
+                    # Calculate grad norm even if not clipping
+                    total_norm = 0.0
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    grad_norm = total_norm ** (1. / 2)
                 
                 # Optimizer step
                 self.optimizer.step()
@@ -519,9 +844,34 @@ class SmolVLM2InfiniTrainer:
                 
                 # Update metrics
                 global_step += 1
+                self.global_step = global_step  # Update for signal handler
                 step_loss = loss.item()
                 total_loss += step_loss
                 epoch_loss += step_loss
+                
+                # Track training metrics
+                current_lr = self.scheduler.get_last_lr()[0] if hasattr(self.scheduler, 'get_last_lr') else self.args.learning_rate
+                self.training_metrics['train_loss_history'].append({
+                    'step': global_step,
+                    'loss': step_loss,
+                    'timestamp': datetime.now().isoformat()
+                })
+                self.training_metrics['learning_rates'].append({
+                    'step': global_step,
+                    'lr': current_lr,
+                    'timestamp': datetime.now().isoformat()
+                })
+                self.training_metrics['gradient_norms'].append({
+                    'step': global_step,
+                    'grad_norm': grad_norm,
+                    'timestamp': datetime.now().isoformat()
+                })
+                
+                # Keep only recent history to manage memory
+                max_history = 10000
+                for key in ['train_loss_history', 'learning_rates', 'gradient_norms']:
+                    if len(self.training_metrics[key]) > max_history:
+                        self.training_metrics[key] = self.training_metrics[key][-max_history:]
                 
                 # Update progress bar
                 progress_bar.set_postfix({
@@ -548,18 +898,42 @@ class SmolVLM2InfiniTrainer:
                 # Save checkpoint
                 if self.args.save_steps is not None and self.args.save_steps > 0 and global_step % self.args.save_steps == 0:
                     checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-{global_step}")
-                    self.save_checkpoint(checkpoint_dir, global_step)
+                    
+                    # Intelligent checkpoint strategy:
+                    # - Save full checkpoints at start, major milestones, and periodically
+                    # - Use incremental checkpoints for frequent intermediate saves
+                    checkpoints_saved = len([h for h in self.training_metrics.get('checkpoint_history', []) if h.get('method', '').startswith('custom')])
+                    use_incremental = (
+                        global_step > 100 and  # After initial period
+                        checkpoints_saved > 2 and  # After first few checkpoints
+                        (checkpoints_saved % self.incremental_checkpoint_interval) != 0 and  # Not a periodic full save
+                        global_step % (self.args.save_steps * 5) != 0  # Not a major milestone
+                    )
+                    
+                    self.save_checkpoint(checkpoint_dir, global_step, step_loss, save_incremental=use_incremental)
                 
                 # Evaluation
                 if (self.args.eval_steps is not None and self.args.eval_steps > 0 and 
                     global_step % self.args.eval_steps == 0 and self.eval_dataset is not None):
+                    eval_start_time = time.time()
                     eval_loss = self.evaluate()
-                    logger.info(f"Step {global_step}: eval_loss = {eval_loss:.4f}")
+                    eval_time = time.time() - eval_start_time
+                    
+                    logger.info(f"Step {global_step}: eval_loss = {eval_loss:.4f} (eval time: {eval_time:.2f}s)")
+                    
+                    # Track eval metrics
+                    self.training_metrics['eval_loss_history'].append({
+                        'step': global_step,
+                        'eval_loss': eval_loss,
+                        'eval_time': eval_time,
+                        'timestamp': datetime.now().isoformat()
+                    })
                     
                     # Log eval metrics to TensorBoard
                     if self.tensorboard_writer is not None:
                         try:
                             self.tensorboard_writer.add_scalar('eval/loss', eval_loss, global_step)
+                            self.tensorboard_writer.add_scalar('eval/eval_time', eval_time, global_step)
                             self.tensorboard_writer.flush()
                         except Exception as e:
                             logger.warning(f"Failed to log eval metrics to TensorBoard: {e}")
@@ -580,7 +954,11 @@ class SmolVLM2InfiniTrainer:
             # Save at end of epoch
             if self.args.save_strategy == "epoch":
                 checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-epoch-{epoch + 1}")
-                self.save_checkpoint(checkpoint_dir, global_step)
+                eval_loss = None
+                if self.eval_dataset is not None:
+                    eval_loss = self.evaluate()
+                    self.model.train()
+                self.save_checkpoint(checkpoint_dir, global_step, avg_epoch_loss, eval_loss)
             
             # Check if we've reached max_steps (for early exit from epoch loop)
             if hasattr(self.args, 'max_steps') and self.args.max_steps > 0 and global_step >= self.args.max_steps:
@@ -650,28 +1028,149 @@ class SmolVLM2InfiniTrainer:
         
         return avg_eval_loss
     
-    def save_checkpoint(self, output_dir: str, global_step: int):
-        """Save training checkpoint"""
+    def save_checkpoint(self, output_dir: str, global_step: int, 
+                       step_loss: float = None, eval_loss: float = None,
+                       save_incremental: bool = False):
+        """Save training checkpoint with validation and metrics"""
+        start_time = time.time()
+        
+        # Distributed coordination - only main process saves
+        if not self._coordinate_distributed_checkpoint("save"):
+            logger.debug(f"Non-main process skipping checkpoint save at step {global_step}")
+            return
+            
         os.makedirs(output_dir, exist_ok=True)
         
-        # Save model state
-        model_state = {
-            'model_state_dict': self.model.state_dict(),
+        # Try Nanotron serialization if enabled
+        if self.use_nanotron_checkpointing:
+            nanotron_success = self._save_with_nanotron(output_dir, global_step)
+            if nanotron_success:
+                # Still save our custom metrics and validation
+                self._save_training_metrics(output_dir, global_step, step_loss, eval_loss)
+                validation_success = self._validate_checkpoint_integrity(output_dir)
+                
+                # Update tracking
+                self.training_metrics['checkpoint_history'].append({
+                    'step': global_step,
+                    'path': output_dir,
+                    'timestamp': datetime.now().isoformat(),
+                    'validation_passed': validation_success,
+                    'save_time': time.time() - start_time,
+                    'method': 'nanotron'
+                })
+                
+                self._rotate_checkpoints()
+                logger.info(f"Nanotron checkpoint completed in {time.time() - start_time:.2f}s")
+                return
+        
+        # Get random states for exact reproducibility
+        random_states = {
+            'python_random_state': random.getstate(),
+            'numpy_random_state': np.random.get_state(),
+            'torch_random_state': torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            random_states['torch_cuda_random_state'] = torch.cuda.get_rng_state()
+        
+        # Build checkpoint data
+        current_model_state = self.model.state_dict()
+        checkpoint = {
+            'model_state_dict': current_model_state,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'global_step': global_step,
+            'epoch': getattr(self, 'current_epoch', 0),
+            'random_states': random_states,
+            'timestamp': datetime.now().isoformat(),
+            'training_args': asdict(self.args) if hasattr(self.args, '__dataclass_fields__') else vars(self.args),
+            'training_metrics_snapshot': dict(self.training_metrics),
         }
         
-        torch.save(model_state, os.path.join(output_dir, "training_state.pt"))
+        # Incremental checkpoint logic (save only changed parameters)
+        if save_incremental and self.previous_model_state is not None:
+            logger.info("Saving incremental checkpoint...")
+            model_delta = {}
+            changed_params = 0
+            total_params = 0
+            
+            for name, param in current_model_state.items():
+                total_params += 1
+                if name in self.previous_model_state:
+                    # Check if parameter changed significantly
+                    prev_param = self.previous_model_state[name]
+                    if not torch.allclose(param, prev_param, rtol=1e-6, atol=1e-8):
+                        model_delta[name] = param
+                        changed_params += 1
+                else:
+                    # New parameter
+                    model_delta[name] = param
+                    changed_params += 1
+            
+            if changed_params > 0:
+                checkpoint['model_delta'] = model_delta
+                checkpoint['delta_metadata'] = {
+                    'changed_parameters': changed_params,
+                    'total_parameters': total_params,
+                    'compression_ratio': changed_params / max(total_params, 1)
+                }
+                logger.info(f"Incremental checkpoint: {changed_params}/{total_params} parameters changed")
+            else:
+                logger.info("No parameter changes detected, skipping incremental checkpoint")
+                return
         
-        # Save model separately
-        torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+        # Save with temporary file for atomic write
+        temp_path = os.path.join(output_dir, "training_state.pt.tmp")
+        final_path = os.path.join(output_dir, "training_state.pt")
+        torch.save(checkpoint, temp_path)
+        os.replace(temp_path, final_path)  # Atomic operation
+        
+        # Save model separately for easy loading (full model always)
+        model_path = os.path.join(output_dir, "pytorch_model.bin")
+        torch.save(current_model_state, model_path)
         
         # Save processor
         if self.processor:
             self.processor.save_pretrained(output_dir)
         
-        logger.info(f"Checkpoint saved to {output_dir}")
+        # Save comprehensive training metrics
+        self._save_training_metrics(output_dir, global_step, step_loss, eval_loss)
+        
+        # Save metadata
+        metadata = {
+            'global_step': global_step,
+            'timestamp': datetime.now().isoformat(),
+            'checkpoint_dir': output_dir,
+            'save_time_seconds': time.time() - start_time,
+            'checkpoint_type': 'incremental' if save_incremental else 'full',
+        }
+        with open(os.path.join(output_dir, "checkpoint_metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Validate checkpoint integrity
+        validation_success = self._validate_checkpoint_integrity(output_dir)
+        if not validation_success:
+            logger.error(f"Checkpoint validation failed: {output_dir}")
+            # Don't raise exception, but log the issue
+        
+        
+        # Update tracking
+        self.training_metrics['checkpoint_history'].append({
+            'step': global_step,
+            'path': output_dir,
+            'timestamp': datetime.now().isoformat(),
+            'validation_passed': validation_success,
+            'save_time': time.time() - start_time,
+            'method': 'incremental' if save_incremental else 'custom_full'
+        })
+        
+        # Update previous model state for incremental checkpointing
+        self.previous_model_state = current_model_state.copy()
+        
+        save_time = time.time() - start_time
+        logger.info(f"Checkpoint saved to {output_dir} in {save_time:.2f}s (validation: {'✓' if validation_success else '✗'})")
+        
+        # Manage checkpoint rotation
+        self._rotate_checkpoints()
         
     def save_model(self, output_dir=None):
         """Save the trained model"""
@@ -687,6 +1186,185 @@ class SmolVLM2InfiniTrainer:
         
         logger.info(f"Model saved to {output_dir}")
         
+    def load_checkpoint(self, checkpoint_dir: str) -> int:
+        """Load training checkpoint and resume training state"""
+        # Distributed coordination
+        self._coordinate_distributed_checkpoint("load")
+        
+        # Try Nanotron loading first if that's what we're using
+        if self.use_nanotron_checkpointing and os.path.exists(os.path.join(checkpoint_dir, "config.yaml")):
+            return self._load_with_nanotron(checkpoint_dir)
+        
+        # Standard loading
+        checkpoint_path = os.path.join(checkpoint_dir, "training_state.pt")
+        
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+        
+        logger.info(f"Loading checkpoint from {checkpoint_dir}")
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        
+        # Handle incremental checkpoints
+        if 'model_delta' in checkpoint and 'model_state_dict' not in checkpoint:
+            logger.info("Loading incremental checkpoint, need base checkpoint")
+            # Find the most recent full checkpoint
+            base_checkpoint_path = self._find_base_checkpoint_for_incremental(checkpoint_dir)
+            if base_checkpoint_path:
+                logger.info(f"Loading base checkpoint: {base_checkpoint_path}")
+                base_checkpoint = torch.load(base_checkpoint_path, map_location='cpu')
+                model_state = base_checkpoint['model_state_dict']
+                # Apply delta
+                model_state.update(checkpoint['model_delta'])
+                checkpoint['model_state_dict'] = model_state
+            else:
+                raise RuntimeError("Cannot find base checkpoint for incremental checkpoint")
+        
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Load optimizer state
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Load scheduler state
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Restore training metrics if available
+        if 'training_metrics_snapshot' in checkpoint:
+            self.training_metrics = checkpoint['training_metrics_snapshot']
+            logger.info("Restored training metrics history")
+        
+        # Restore random states for exact reproducibility
+        if 'random_states' in checkpoint:
+            random_states = checkpoint['random_states']
+            random.setstate(random_states['python_random_state'])
+            np.random.set_state(random_states['numpy_random_state'])
+            torch.set_rng_state(random_states['torch_random_state'])
+            if torch.cuda.is_available() and 'torch_cuda_random_state' in random_states:
+                torch.cuda.set_rng_state(random_states['torch_cuda_random_state'])
+        
+        global_step = checkpoint['global_step']
+        if 'epoch' in checkpoint:
+            self.current_epoch = checkpoint['epoch']
+        
+        # Set previous model state for incremental checkpointing
+        self.previous_model_state = self.model.state_dict().copy()
+        
+        logger.info(f"Resumed from checkpoint at step {global_step}")
+        return global_step
+    
+    def _load_with_nanotron(self, checkpoint_dir: str) -> int:
+        """Load checkpoint using Nanotron's native serialization"""
+        try:
+            # Load metadata to get global step
+            metadata_path = os.path.join(checkpoint_dir, "checkpoint_metadata.json")
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                    global_step = metadata.get('global_step', 0)
+            else:
+                global_step = 0
+            
+            load(
+                model=self.model,
+                optimizer=self.optimizer,
+                lr_scheduler=self.scheduler,
+                parallel_context=getattr(self, 'parallel_context', None),
+                root_folder=Path(checkpoint_dir)
+            )
+            
+            logger.info(f"Nanotron checkpoint loaded from {checkpoint_dir}")
+            return global_step
+            
+        except Exception as e:
+            logger.error(f"Failed to load with Nanotron serialization: {e}")
+            raise
+    
+    def _find_base_checkpoint_for_incremental(self, incremental_checkpoint_dir: str) -> Optional[str]:
+        """Find the base checkpoint for an incremental checkpoint"""
+        # Extract step number from incremental checkpoint
+        try:
+            step_str = incremental_checkpoint_dir.split('-')[-1]
+            current_step = int(step_str)
+        except:
+            return None
+        
+        # Look for full checkpoints with step numbers less than current
+        base_dir = os.path.dirname(incremental_checkpoint_dir)
+        checkpoint_dirs = glob.glob(os.path.join(base_dir, "checkpoint-*"))
+        
+        valid_base_checkpoints = []
+        for checkpoint_dir in checkpoint_dirs:
+            try:
+                checkpoint_step = int(checkpoint_dir.split('-')[-1])
+                if checkpoint_step < current_step:
+                    checkpoint_path = os.path.join(checkpoint_dir, "training_state.pt")
+                    if os.path.exists(checkpoint_path):
+                        # Check if it's a full checkpoint (not incremental)
+                        checkpoint_data = torch.load(checkpoint_path, map_location='cpu')
+                        if 'model_state_dict' in checkpoint_data and 'model_delta' not in checkpoint_data:
+                            valid_base_checkpoints.append((checkpoint_step, checkpoint_path))
+            except:
+                continue
+        
+        if valid_base_checkpoints:
+            # Return the most recent full checkpoint
+            valid_base_checkpoints.sort(key=lambda x: x[0])
+            return valid_base_checkpoints[-1][1]
+        
+        return None
+    
+    def find_latest_checkpoint(self) -> Optional[str]:
+        """Find the latest checkpoint in the output directory"""
+        if not os.path.exists(self.args.output_dir):
+            return None
+        
+        checkpoint_dirs = glob.glob(os.path.join(self.args.output_dir, "checkpoint-*"))
+        if not checkpoint_dirs:
+            return None
+        
+        # Sort by step number
+        def get_step_from_checkpoint(path):
+            try:
+                return int(path.split('-')[-1])
+            except:
+                return -1
+        
+        checkpoint_dirs.sort(key=get_step_from_checkpoint)
+        latest_checkpoint = checkpoint_dirs[-1]
+        
+        # Verify it's a valid checkpoint
+        if os.path.exists(os.path.join(latest_checkpoint, "training_state.pt")):
+            return latest_checkpoint
+        return None
+    
+    def _rotate_checkpoints(self):
+        """Keep only the N most recent checkpoints"""
+        if not hasattr(self.model_args, 'max_checkpoints_to_keep'):
+            return
+        
+        max_to_keep = self.model_args.max_checkpoints_to_keep
+        if max_to_keep <= 0:
+            return
+        
+        checkpoint_dirs = glob.glob(os.path.join(self.args.output_dir, "checkpoint-*"))
+        if len(checkpoint_dirs) <= max_to_keep:
+            return
+        
+        # Sort by step number
+        def get_step_from_checkpoint(path):
+            try:
+                return int(path.split('-')[-1])
+            except:
+                return -1
+        
+        checkpoint_dirs.sort(key=get_step_from_checkpoint)
+        
+        # Remove oldest checkpoints
+        checkpoints_to_delete = checkpoint_dirs[:-max_to_keep]
+        for checkpoint_dir in checkpoints_to_delete:
+            logger.info(f"Removing old checkpoint: {checkpoint_dir}")
+            shutil.rmtree(checkpoint_dir, ignore_errors=True)
+    
     def close_tensorboard(self):
         """Close TensorBoard writer"""
         if self.tensorboard_writer is not None:
