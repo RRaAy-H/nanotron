@@ -799,13 +799,46 @@ def main():
 
         eval_dataset = None
         if data_args.eval_data_path and os.path.exists(data_args.eval_data_path):
-            eval_dataset = VisionLanguageDataset(
-                data_path=data_args.eval_data_path,
-                image_dir=data_args.image_dir,
-                processor=processor,
-                max_length=data_args.max_seq_length,
-            )
-            logger.info(f"Loaded evaluation dataset with {len(eval_dataset)} samples")
+            if os.path.isdir(data_args.eval_data_path):
+                logger.info(f"Loading evaluation dataset from directory: {data_args.eval_data_path}")
+                all_eval_data = []
+                for filename in sorted(os.listdir(data_args.eval_data_path)):
+                    if filename.endswith(".json"):
+                        path = os.path.join(data_args.eval_data_path, filename)
+                        try:
+                            with open(path, "r") as f:
+                                data = json.load(f)
+                                all_eval_data.extend(data)
+                                logger.info(f"Loaded {len(data)} samples from {filename}")
+                        except Exception as e:
+                            logger.warning(f"Failed to load {filename}: {e}")
+                            continue
+
+                if not all_eval_data:
+                    logger.warning(f"No valid JSON files found in {data_args.eval_data_path}")
+                    eval_dataset = None
+                else:
+                    # Create temporary merged file for evaluation
+                    eval_merged_path = os.path.join(tempfile.gettempdir(), "merged_eval_data.json")
+                    with open(eval_merged_path, "w") as f:
+                        json.dump(all_eval_data, f)
+                    logger.info(f"Merged evaluation dataset saved to {eval_merged_path}")
+
+                    eval_dataset = VisionLanguageDataset(
+                        data_path=eval_merged_path,
+                        image_dir=data_args.image_dir,
+                        processor=processor,
+                        max_length=data_args.max_seq_length,
+                    )
+                    logger.info(f"Loaded evaluation dataset with {len(eval_dataset)} samples")
+            else:
+                eval_dataset = VisionLanguageDataset(
+                    data_path=data_args.eval_data_path,
+                    image_dir=data_args.image_dir,
+                    processor=processor,
+                    max_length=data_args.max_seq_length,
+                )
+                logger.info(f"Loaded evaluation dataset with {len(eval_dataset)} samples")
         else:
             logger.info("No evaluation dataset provided")
 
