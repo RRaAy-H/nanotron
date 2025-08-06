@@ -392,14 +392,8 @@ class SmolVLM2InfiniTrainer:
             
             try:
                 self.tensorboard_writer = SummaryWriter(log_dir=log_dir)
-                logger.info(f"✓ TensorBoard writer initialized successfully: {log_dir}")
-                
-                # Test write to ensure it's working
-                self.tensorboard_writer.add_scalar('test/initialization', 1.0, 0)
-                self.tensorboard_writer.flush()
-                
-                logger.info(f"✓ TensorBoard test write successful")
-                logger.info(f"🚀 View logs with: tensorboard --logdir={self.tensorboard_args.tensorboard_dir}")
+                logger.info(f"Initialized TensorBoard logging: {log_dir}")
+                logger.info(f"View logs with: tensorboard --logdir={self.tensorboard_args.tensorboard_dir}")
                 
             except Exception as e:
                 logger.error(f"Failed to initialize TensorBoard writer: {e}")
@@ -437,12 +431,6 @@ class SmolVLM2InfiniTrainer:
     def train(self):
         """Main training loop"""
         logger.info("Starting training...")
-        
-        # Debug: Check if TensorBoard is enabled
-        if self.tensorboard_writer is not None:
-            logger.info("📊 TensorBoard logging is ENABLED")
-        else:
-            logger.info("⚠️  TensorBoard logging is DISABLED")
         
         # Move model to device and ensure proper dtype
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -554,10 +542,6 @@ class SmolVLM2InfiniTrainer:
                         # Flush every few steps to ensure data is written
                         if global_step % 5 == 0:
                             self.tensorboard_writer.flush()
-                            
-                        # Debug log every 10 steps
-                        if global_step % 10 == 0:
-                            logger.info(f"📊 TensorBoard logged step {global_step}: loss={step_loss:.4f}")
                     except Exception as e:
                         logger.warning(f"Failed to log to TensorBoard at step {global_step}: {e}")
                 
@@ -577,7 +561,6 @@ class SmolVLM2InfiniTrainer:
                         try:
                             self.tensorboard_writer.add_scalar('eval/loss', eval_loss, global_step)
                             self.tensorboard_writer.flush()
-                            logger.info(f"📊 TensorBoard logged eval at step {global_step}: eval_loss={eval_loss:.4f}")
                         except Exception as e:
                             logger.warning(f"Failed to log eval metrics to TensorBoard: {e}")
                     
@@ -591,7 +574,6 @@ class SmolVLM2InfiniTrainer:
                 try:
                     self.tensorboard_writer.add_scalar('train/epoch_loss', avg_epoch_loss, epoch + 1)
                     self.tensorboard_writer.flush()
-                    logger.info(f"📊 TensorBoard logged epoch {epoch + 1}: avg_loss={avg_epoch_loss:.4f}")
                 except Exception as e:
                     logger.warning(f"Failed to log epoch metrics to TensorBoard: {e}")
             
@@ -613,7 +595,6 @@ class SmolVLM2InfiniTrainer:
             try:
                 self.tensorboard_writer.add_scalar('train/final_loss', total_loss / global_step, global_step)
                 self.tensorboard_writer.flush()
-                logger.info(f"📊 TensorBoard logged final metrics: final_loss={total_loss / global_step:.4f}")
             except Exception as e:
                 logger.warning(f"Failed to log final metrics to TensorBoard: {e}")
         
@@ -712,7 +693,7 @@ class SmolVLM2InfiniTrainer:
             try:
                 self.tensorboard_writer.flush()
                 self.tensorboard_writer.close()
-                logger.info("✓ Closed TensorBoard logging successfully")
+                logger.info("Closed TensorBoard logging")
             except Exception as e:
                 logger.warning(f"Error closing TensorBoard writer: {e}")
             finally:
