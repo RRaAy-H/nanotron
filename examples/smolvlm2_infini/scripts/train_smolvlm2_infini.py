@@ -269,6 +269,15 @@ class VisionLanguageDataset(Dataset):
                 if inputs[key] is not None:
                     inputs[key] = inputs[key].squeeze(0)
             
+            # Create labels for language modeling (CRITICAL FIX)
+            if 'input_ids' in inputs:
+                # For causal language modeling, labels should be input_ids shifted by 1
+                labels = inputs['input_ids'].clone()
+                # Set padding tokens to -100 (ignored in loss computation)
+                if 'attention_mask' in inputs:
+                    labels[inputs['attention_mask'] == 0] = -100
+                inputs['labels'] = labels
+            
             return inputs
             
         except KeyError as e:
@@ -312,6 +321,13 @@ class VisionLanguageDataset(Dataset):
                     if inputs[key] is not None:
                         inputs[key] = inputs[key].squeeze(0)
                 
+                # Create labels for text-only training
+                if 'input_ids' in inputs:
+                    labels = inputs['input_ids'].clone()
+                    if 'attention_mask' in inputs:
+                        labels[inputs['attention_mask'] == 0] = -100
+                    inputs['labels'] = labels
+                
                 return inputs
             else:
                 raise
@@ -333,6 +349,13 @@ class VisionLanguageDataset(Dataset):
             for key in inputs:
                 if inputs[key] is not None:
                     inputs[key] = inputs[key].squeeze(0)
+            
+            # Create labels for dummy sample
+            if 'input_ids' in inputs:
+                labels = inputs['input_ids'].clone()
+                if 'attention_mask' in inputs:
+                    labels[inputs['attention_mask'] == 0] = -100
+                inputs['labels'] = labels
                     
             return inputs
 
